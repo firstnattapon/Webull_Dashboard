@@ -65,7 +65,7 @@ if not project_id:
 
 db = get_client(project_id)
 
-st.title("Shannon Demon Dashboard")
+st.subheader("Shannon Demon Dashboard")
 
 state = load_state(db, state_collection, state_document)
 if state:
