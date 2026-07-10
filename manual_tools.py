@@ -1,7 +1,7 @@
 """Pure logic and Webull helpers for the Streamlit Manual page.
 
 Credentials are accepted only as runtime values. This module never writes
-them to disk, logs them, or includes them in returned dictionaries.
+them to disk, logs them, or includes them in returned dictionaries. 
 """
 
 from __future__ import annotations
