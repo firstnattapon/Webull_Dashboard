@@ -517,14 +517,14 @@ class WebullManualClient:
 
     def preview_market_order(self, payload: list[dict[str, str]]) -> Any:
         return response_json_or_raise(
-            self.trade_client.order_v2.preview_order(
+            self.trade_client.order_v3.preview_order(
                 self.settings.account_id.strip(), payload
             )
         )
 
     def place_market_order(self, payload: list[dict[str, str]]) -> Any:
         return response_json_or_raise(
-            self.trade_client.order_v2.place_order(
+            self.trade_client.order_v3.place_order(
                 self.settings.account_id.strip(), payload
             )
         )
