@@ -218,3 +218,73 @@ def test_price_column_is_resolved_dynamically():
     display = build_trade_log_display(trades, "last_price", 1500.0, 100.0)
 
     assert display[(GROUP_LOGGED, "ราคา Pₙ (USD)")].tolist() == [100.0]
+
+
+# ---------------------------------------------------------------------------
+# ส่วนต่างเป้าหมาย sign convention: sell = −, buy = +
+# ---------------------------------------------------------------------------
+
+def rebalance_row(created_at, side, action, rebalance, value_now):
+    return {
+        "created_at": created_at,
+        "status": "ORDER_SUBMITTED" if side else "PASS_THRESHOLD",
+        "decision": {
+            "action": action, "side": side, "reason": "x",
+            "rebalance": rebalance, "value_now_usd": value_now,
+        },
+        "market_state": {"quantity": 1.0, "last_price": 100.0},
+    }
+
+
+def test_rebalance_is_signed_sell_negative_buy_positive():
+    trades = normalize([
+        rebalance_row("2026-07-10T19:00:00Z", "SELL", "SELL", 200.0, 1700.0),
+        rebalance_row("2026-07-10T18:00:00Z", "BUY", "BUY", 80.0, 1420.0),
+    ])
+
+    display = build_trade_log_display(trades, "market_state_last_price", 1500.0, 100.0)
+
+    signed = display[(GROUP_LOGGED, "ส่วนต่างเป้าหมาย (USD)")].tolist()
+    assert signed == [-200.0, 80.0]  # newest first: SELL → −, BUY → +
+
+
+def test_pass_rows_take_sign_from_value_versus_fix_c():
+    trades = normalize([
+        rebalance_row("2026-07-10T19:00:00Z", None, "PASS", 11.31, 1511.31),
+        rebalance_row("2026-07-10T18:00:00Z", None, "PASS", 6.5, 1493.5),
+    ])
+
+    display = build_trade_log_display(trades, "market_state_last_price", 1500.0, 100.0)
+
+    signed = display[(GROUP_LOGGED, "ส่วนต่างเป้าหมาย (USD)")].tolist()
+    # above target → would sell → −; below target → would buy → +
+    assert signed == [-11.31, 6.5]
+
+
+# ---------------------------------------------------------------------------
+# Anchor P₀ = first price in the window → Aₙ/Rₙ/Eₙ start at 0
+# ---------------------------------------------------------------------------
+
+def test_anchoring_at_first_price_zeroes_the_oldest_row():
+    display = build_trade_log_display(sample_log(), "market_state_last_price", 1500.0, 100.0)
+
+    oldest = display.iloc[-1]  # display is newest first
+    assert oldest[(GROUP_REFERENCE, "Rₙ อ้างอิง (USD)")] == 0.0
+    assert oldest[(GROUP_REBALANCED, "ΔAₙ ต่อสเต็ป (USD)")] == 0.0
+    assert oldest[(GROUP_REBALANCED, "Aₙ สะสม (USD)")] == 0.0
+    assert oldest[(GROUP_REBALANCED, "Eₙ ส่วนเกินสะสม (USD)")] == 0.0
+
+
+def test_real_log_window_shows_near_zero_harvest_not_synthetic_step():
+    """Prices from the 2026-07-10 AAPL export: one-way drift, all PASS.
+
+    Anchored at the first in-window price there is no synthetic 3218-USD
+    first step and the harvested excess is ~0 (no closed round trip).
+    """
+    prices = [314.55, 314.8, 314.96, 315.335, 315.545, 316.02, 316.32, 316.635]
+    rows = rebalancing_cashflow_from_prices(prices, 1500.0, prices[0])
+
+    assert rows[1]["delta_actual"] == 0.0  # first tick anchors, no fake jump
+    final = rows[-1]
+    assert abs(final["actual_cumulative"]) < 15.0  # ≈ 9.9, not 3228
+    assert 0.0 <= final["excess"] < 0.05  # harvest ≈ 0 on a one-way path

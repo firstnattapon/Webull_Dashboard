@@ -89,7 +89,15 @@ with st.sidebar:
         "Fix_c", min_value=0.01, value=1500.0, step=100.0, format="%.2f"
     )
     guide_p0 = st.number_input(
-        "ราคาเริ่มต้น t₀ (P₀)", min_value=0.01, value=100.0, format="%.5f"
+        "ราคาเริ่มต้น t₀ (P₀)",
+        min_value=0.01,
+        value=100.0,
+        format="%.5f",
+        help=(
+            "ใช้เฉพาะเส้นสาธิตตอนยังไม่มี trade log — เมื่อมีข้อมูลแล้ว "
+            "ระบบ anchor P₀ ที่ราคาแรกในหน้าต่างโดยอัตโนมัติ "
+            "เพื่อไม่ให้เกิดสเต็ปปลอมจาก P₀ ที่ไกลจากราคาจริง"
+        ),
     )
     if st.button("Refresh"):
         st.cache_resource.clear()
@@ -99,20 +107,28 @@ st.title("Shannon Demon Dashboard")
 st.page_link("pages/Manual.py", label="Open Manual Test Lab", icon="🧪")
 
 st.subheader("หลักการ Rebalancing Learning Guide 101")
-principle_cols = st.columns(2)
+principle_cols = st.columns(3)
 with principle_cols[0]:
-    st.markdown("#### 1) เส้นอ้างอิงทางทฤษฎี")
+    st.markdown("#### 1) เส้นอ้างอิง Rₙ — ทุน×เทรนด์")
     st.code("Rₙ = Fix_c × ln(Pₙ / P₀)", language=None)
     st.caption(
-        "กระแสเงินสดอ้างอิงของการรักษามูลค่าสินทรัพย์คงที่แบบต่อเนื่อง: "
-        "ค่าบวกคือรับเงินจากการขาย และค่าลบคือใช้เงินซื้อ"
+        "กระแสเงินสด baseline ที่ระดับราคาอย่างเดียวอธิบายได้ "
+        "(rebalance ต่อเนื่องเชิงอุดมคติ) — ขึ้นลงตามเทรนด์ ไม่ใช่ฝีมือ harvest"
     )
 with principle_cols[1]:
-    st.markdown("#### 2) เส้น Rebalancing จริง")
-    st.code("Aₙ = Fix_c × Σ [Pᵢ / Pᵢ₋₁ − 1]\nEₙ = Aₙ − Rₙ", language=None)
+    st.markdown("#### 2) เงินสดสะสมจริง Aₙ")
+    st.code("Aₙ = Fix_c × Σ [Pᵢ / Pᵢ₋₁ − 1]", language=None)
     st.caption(
-        "Aₙ สะสมผลจากทุกช่วงราคาที่เกิดขึ้นจริง "
-        "ส่วน Eₙ คือเงินเกินทุนสะสมเหนือเส้นอ้างอิง"
+        "กระแสเงินสดสุทธิจากการ rebalance ทุกสเต็ป (+ รับจากขาย, − จ่ายซื้อ) "
+        "— ยังปนส่วนของเทรนด์ จึงไม่ใช่ตัววัดกำไรโดยตรง"
+    )
+with principle_cols[2]:
+    st.markdown("#### 3) กำไร harvest จริง Eₙ")
+    st.code("Eₙ = Aₙ − Rₙ  ≥ 0", language=None)
+    st.caption(
+        "ทุนส่วนเกินเหนือเส้นอ้างอิง = กำไรจากความผันผวนล้วน ๆ "
+        "(แยกทุนและเทรนด์ออกแล้ว) ไม่ลดลงเลย และ realize เต็ม"
+        "เมื่อรอบซื้อ-ขายปิด (ราคาย้อนกลับมาระดับเดิม)"
     )
 
 if not project_id:
@@ -143,17 +159,32 @@ try:
             st.bar_chart(trades["status"].value_counts())
 
         price_column = find_trade_price_column(trades)
+        prices = (
+            trade_price_series(trades, price_column) if price_column else []
+        )
+        # Anchor P₀ at the first price inside the window so Aₙ/Rₙ/Eₙ all
+        # start at 0 (ทุนถูกแยกออก) and measure only what happened in view.
+        # An external P₀ far from the traded range would inject one huge
+        # synthetic first step that dwarfs the real harvest.
+        anchor_p0 = prices[0] if prices else float(guide_p0)
+
         if price_column:
             st.caption(
                 "จัดกลุ่มคอลัมน์เพื่ออ่านง่าย — "
                 "① Logged DNA (บันทึกจากบอท) · "
                 "② เส้นอ้างอิงทางทฤษฎี Rₙ · "
                 "③ เส้น Rebalancing จริง Aₙ, Eₙ "
-                f"(คอลัมน์ราคา: `{price_column}`)"
+                f"(คอลัมน์ราคา: `{price_column}` · "
+                f"anchor P₀ = ราคาแรกในหน้าต่าง {anchor_p0:,.2f} "
+                "→ แถวเก่าสุด Aₙ = Rₙ = Eₙ = 0)"
+            )
+            st.caption(
+                "เครื่องหมาย ส่วนต่างเป้าหมาย: − ต้องขายออก · + ต้องซื้อเข้า "
+                "(มุมปรับพอร์ต — ตรงข้ามกับ ΔAₙ/Aₙ ที่ + คือเงินสดรับจากการขาย)"
             )
             st.dataframe(
                 build_trade_log_display(
-                    trades, price_column, float(guide_fix_c), float(guide_p0)
+                    trades, price_column, float(guide_fix_c), anchor_p0
                 ),
                 use_container_width=True,
             )
@@ -161,9 +192,6 @@ try:
             st.dataframe(trades, use_container_width=True)
 
         st.subheader("กราฟตาม Learning Guide 101 จาก trade log")
-        prices = (
-            trade_price_series(trades, price_column) if price_column else []
-        )
         if not prices:
             st.info(
                 "ไม่พบคอลัมน์ราคาที่ใช้งานได้ใน trade log "
@@ -174,16 +202,37 @@ try:
             render_reference_chart(float(guide_fix_c), float(guide_p0), 0.0)
         else:
             rows = rebalancing_cashflow_from_prices(
-                prices, float(guide_fix_c), float(guide_p0)
+                prices, float(guide_fix_c), anchor_p0
             )
             final_row = rows[-1]
-            cols = st.columns(4)
-            cols[0].metric("ราคาสุดท้าย Pₙ", f"{final_row['price']:,.2f}")
-            cols[1].metric(
-                "Rebalancing Aₙ", f"{final_row['actual_cumulative']:+,.2f}"
+            actions = trades.get("decision_action")
+            real_trades = (
+                int(actions.isin(["BUY", "SELL"]).sum())
+                if actions is not None
+                else 0
             )
-            cols[2].metric("อ้างอิง Rₙ", f"{final_row['ln_reference']:+,.2f}")
-            cols[3].metric("ส่วนเกินสะสม Eₙ", f"{final_row['excess']:+,.2f}")
+            cols = st.columns(5)
+            cols[0].metric(
+                "กำไร harvest Eₙ", f"{final_row['excess']:+,.2f}"
+            )
+            cols[1].metric("ราคาสุดท้าย Pₙ", f"{final_row['price']:,.2f}")
+            cols[2].metric(
+                "เงินสดสะสม Aₙ", f"{final_row['actual_cumulative']:+,.2f}"
+            )
+            cols[3].metric("อ้างอิง Rₙ", f"{final_row['ln_reference']:+,.2f}")
+            cols[4].metric("เทรดจริง (BUY/SELL)", real_trades)
+            if real_trades == 0:
+                st.warning(
+                    "ทุกแถวในหน้าต่างนี้เป็น PASS — ไม่มีการส่ง order จริง "
+                    "Aₙ/Rₙ/Eₙ ที่แสดงจึงเป็นเส้นเชิงทฤษฎีจาก price path "
+                    "(what-if rebalance ทุก tick) ไม่ใช่เงินสดที่ทำได้จริง"
+                )
+            st.caption(
+                f"anchor P₀ = ราคาแรกในหน้าต่าง ({anchor_p0:,.2f}) → "
+                "Eₙ เริ่มจาก 0 แยกทุนออก อ่านเป็นกำไรสะสมได้ตรง ๆ; "
+                "เส้น Rₙ เต็มประวัติตั้งแต่ P₀ จริงของบอทดูได้จากคอลัมน์ "
+                "`baseline_pnl` ที่บอทบันทึกไว้ทุกแถว"
+            )
 
             st.markdown(
                 f"#### กราฟที่ 1 — เปรียบเทียบตามลำดับ trade (คอลัมน์ราคา: "
@@ -194,7 +243,7 @@ try:
                 use_container_width=True,
             )
             render_reference_chart(
-                float(guide_fix_c), float(guide_p0), float(final_row["excess"])
+                float(guide_fix_c), anchor_p0, float(final_row["excess"])
             )
 except Exception as exc:
     st.error(f"Firestore error: {exc}")
