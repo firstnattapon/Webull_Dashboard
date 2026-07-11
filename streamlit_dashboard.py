@@ -14,6 +14,7 @@ from manual_tools import (
 from rebalancing_charts import cashflow_comparison_chart, reference_shift_chart
 from trade_log import (
     TRADE_PRICE_COLUMNS,
+    build_trade_log_display,
     find_trade_price_column,
     trade_price_series,
 )
@@ -140,10 +141,26 @@ try:
     else:
         if "status" in trades:
             st.bar_chart(trades["status"].value_counts())
-        st.dataframe(trades, use_container_width=True)
+
+        price_column = find_trade_price_column(trades)
+        if price_column:
+            st.caption(
+                "จัดกลุ่มคอลัมน์เพื่ออ่านง่าย — "
+                "① Logged DNA (บันทึกจากบอท) · "
+                "② เส้นอ้างอิงทางทฤษฎี Rₙ · "
+                "③ เส้น Rebalancing จริง Aₙ, Eₙ "
+                f"(คอลัมน์ราคา: `{price_column}`)"
+            )
+            st.dataframe(
+                build_trade_log_display(
+                    trades, price_column, float(guide_fix_c), float(guide_p0)
+                ),
+                use_container_width=True,
+            )
+        else:
+            st.dataframe(trades, use_container_width=True)
 
         st.subheader("กราฟตาม Learning Guide 101 จาก trade log")
-        price_column = find_trade_price_column(trades)
         prices = (
             trade_price_series(trades, price_column) if price_column else []
         )
