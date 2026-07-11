@@ -12,6 +12,7 @@ from manual_tools import (
     WebullResponseError,
     build_market_order_payload,
     calculate_shannon_decision,
+    calculate_rebalancing_curve,
     decode_dna,
     decode_number_stream,
     dna_summary,
@@ -21,6 +22,7 @@ from manual_tools import (
     format_order_quantity,
     generate_client_order_id,
     response_json_or_raise,
+    rebalancing_scenario_table,
     run_benchmark,
 )
 
@@ -75,6 +77,25 @@ def test_encode_round_trip_and_summary():
 @pytest.mark.parametrize("code,length", [("bypass:3", 3), ("[1,4]", 4)])
 def test_bypass_dna(code, length):
     assert decode_dna(code).tolist() == [1] * length
+
+
+def test_rebalancing_curve_models_constant_value_bands():
+    rows = calculate_rebalancing_curve(1000.0, 100.0, 50.0, 50.0, 150.0, steps=3)
+    assert [round(row["price"], 2) for row in rows] == [50.0, 100.0, 150.0]
+    assert rows[1]["quantity"] == 10.0
+    assert rows[1]["target_position_value"] == 1000.0
+    assert rows[1]["band_low"] == 950.0
+    assert rows[1]["band_high"] == 1050.0
+    assert rows[0]["action"] == "BUY_ZONE"
+    assert rows[1]["action"] == "ANCHOR"
+    assert rows[2]["action"] == "SELL_ZONE"
+
+
+def test_rebalancing_scenario_table_uses_logical_fix_c_rules():
+    rows = rebalancing_scenario_table(10.0, 1000.0, 100.0, 50.0, 50.0, 150.0, steps=3)
+    assert [row["action"] for row in rows] == ["BUY", "PASS", "SELL"]
+    assert rows[0]["order_quantity"] == 10.0
+    assert rows[2]["order_quantity"] == pytest.approx(500.0 / 150.0, abs=1e-5)
 
 
 @pytest.mark.parametrize(

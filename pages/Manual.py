@@ -16,6 +16,8 @@ from manual_tools import (
     dna_summary,
     encode_dna,
     generate_client_order_id,
+    calculate_rebalancing_curve,
+    rebalancing_scenario_table,
     run_benchmark,
 )
 
@@ -87,20 +89,20 @@ with st.sidebar:
 
     st.text_input(
         "Account ID",
-        value="1251161573554425856",
+        value="",
         key="manual_account_id",
         autocomplete="off",
     )
     st.text_input(
         "App Key",
-        value="c12c25c93f98169ad56f5148e4edfd16",
+        value="",
         type="password",
         key="manual_app_key",
         autocomplete="off",
     )
     st.text_input(
         "App Secret",
-        value="f3ac0da97d2085ad4ce14b961cbd8824",
+        value="",
         type="password",
         key="manual_app_secret",
         autocomplete="off",
@@ -119,6 +121,7 @@ with st.sidebar:
     account_tab,
     dna_tab,
     fix_c_tab,
+    rebalancing_tab,
     benchmark_tab,
 ) = st.tabs(
     [
@@ -127,6 +130,7 @@ with st.sidebar:
         "Account / Orders",
         "DNA",
         "Logical FIX_C",
+        "Rebalancing 101",
         "Benchmark",
     ]
 )
@@ -494,6 +498,111 @@ with fix_c_tab:
             st.json(data)
         except Exception as exc:
             render_error(exc)
+
+
+with rebalancing_tab:
+    st.subheader("Rebalancing Learning Guide 101")
+    st.caption(
+        "สรุปหลักจาก rebalancing_learning_guide_101_corrected: ตั้งค่าเป้าหมาย "
+        "FIX_C, ใช้ P0 เป็นราคาอ้างอิง, ปล่อยให้อยู่ในกรอบ DIFF เพื่อเลี่ยงการเทรดถี่ "
+        "และใช้กราฟช่วยดูโซน BUY / PASS / SELL ก่อนส่งคำสั่งจริง"
+    )
+    st.info(
+        "หลักคิด: ถ้ามูลค่าหุ้นต่ำกว่า FIX_C − DIFF ให้เติมกลับ (BUY); "
+        "ถ้าสูงกว่า FIX_C + DIFF ให้ขายส่วนเกิน (SELL); ถ้าอยู่ในกรอบให้ PASS. "
+        "Baseline PnL ใช้สูตร FIX_C × ln(price / P0) เพื่อดูผลเชิง log-return ของแกนราคา"
+    )
+
+    guide_cols = st.columns(3)
+    guide_quantity = guide_cols[0].number_input(
+        "Guide current quantity", min_value=0.0, value=10.0, format="%.5f"
+    )
+    guide_fix_c = guide_cols[1].number_input(
+        "Guide FIX_C", min_value=0.00001, value=1500.0, format="%.2f"
+    )
+    guide_p0 = guide_cols[2].number_input(
+        "Guide P0", min_value=0.00001, value=100.0, format="%.5f"
+    )
+    guide_cols = st.columns(3)
+    guide_diff = guide_cols[0].number_input(
+        "Guide DIFF", min_value=0.0, value=30.0, format="%.2f"
+    )
+    guide_price_min = guide_cols[1].number_input(
+        "Chart price min", min_value=0.00001, value=50.0, format="%.5f"
+    )
+    guide_price_max = guide_cols[2].number_input(
+        "Chart price max", min_value=0.00001, value=150.0, format="%.5f"
+    )
+
+    try:
+        curve_rows = calculate_rebalancing_curve(
+            float(guide_fix_c), float(guide_p0), float(guide_diff),
+            float(guide_price_min), float(guide_price_max), steps=80,
+        )
+        width, height, pad = 760, 320, 36
+        series = {
+            "FIX_C target": ("#2563eb", [row["target_position_value"] for row in curve_rows]),
+            "Lower DIFF band": ("#dc2626", [row["band_low"] for row in curve_rows]),
+            "Upper DIFF band": ("#16a34a", [row["band_high"] for row in curve_rows]),
+            "Portfolio log-value": ("#9333ea", [row["portfolio_value"] for row in curve_rows]),
+        }
+        prices = [row["price"] for row in curve_rows]
+        all_values = [value for _, values in series.values() for value in values]
+        min_price, max_price = min(prices), max(prices)
+        min_value, max_value = min(all_values), max(all_values)
+
+        def x_pos(price: float) -> float:
+            return pad + (price - min_price) / (max_price - min_price) * (width - 2 * pad)
+
+        def y_pos(value: float) -> float:
+            span = max(max_value - min_value, 1.0)
+            return height - pad - (value - min_value) / span * (height - 2 * pad)
+
+        polylines = []
+        legend = []
+        for label, (color, values) in series.items():
+            points = " ".join(
+                f"{x_pos(price):.1f},{y_pos(value):.1f}"
+                for price, value in zip(prices, values)
+            )
+            polylines.append(
+                f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="2.5" />'
+            )
+            legend.append(
+                f'<span style="display:inline-flex;align-items:center;margin-right:18px;">'
+                f'<span style="width:12px;height:12px;background:{color};display:inline-block;margin-right:6px;"></span>'
+                f'{label}</span>'
+            )
+        svg_html = f"""<div style="width:100%;overflow-x:auto;">
+            <svg viewBox="0 0 {width} {height}" style="max-width:100%;background:#fff;border:1px solid #e5e7eb;border-radius:8px;">
+                <line x1="{pad}" y1="{height-pad}" x2="{width-pad}" y2="{height-pad}" stroke="#9ca3af" />
+                <line x1="{pad}" y1="{pad}" x2="{pad}" y2="{height-pad}" stroke="#9ca3af" />
+                {''.join(polylines)}
+                <text x="{pad}" y="22" font-size="12" fill="#374151">Rebalancing Guide Chart</text>
+                <text x="{width-pad-110}" y="{height-10}" font-size="11" fill="#6b7280">Price</text>
+                <text x="8" y="{pad-10}" font-size="11" fill="#6b7280">USD</text>
+            </svg>
+            <div style="font-size:13px;margin-top:8px;">{''.join(legend)}</div>
+        </div>"""
+        st.html(svg_html)
+
+        scenario_rows = rebalancing_scenario_table(
+            float(guide_quantity), float(guide_fix_c), float(guide_p0),
+            float(guide_diff), float(guide_price_min), float(guide_price_max),
+            steps=9,
+        )
+        st.markdown("#### Decision scenarios from the chart")
+        st.json(scenario_rows)
+
+        st.markdown("#### Checklist ก่อนกด order")
+        st.markdown(
+            "- ยืนยันว่า quote ล่าสุดและ position มาจาก endpoint/account ที่ถูกต้อง\n"
+            "- ใช้ DIFF เป็นกันชนค่าธรรมเนียม/สเปรด/ความผันผวน ไม่ควรตั้งแคบเกินไป\n"
+            "- Preview order ก่อนเสมอ และใช้ Production เฉพาะเมื่อ confirmation ตรงครบถ้วน\n"
+            "- ทบทวนขนาด order_quantity จากตาราง scenario เทียบกับ buying power/position จริง"
+        )
+    except Exception as exc:
+        render_error(exc)
 
 
 with benchmark_tab:
