@@ -16,6 +16,7 @@ from rebalancing_charts import cashflow_comparison_chart, reference_shift_chart
 st.set_page_config(page_title="Shannon Demon Dashboard", layout="wide")
 
 TRADE_PRICE_COLUMNS = (
+    "market_state_last_price",
     "last_price",
     "price",
     "decision_last_price",
