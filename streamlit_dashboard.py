@@ -12,18 +12,13 @@ from manual_tools import (
     rebalancing_reference_curve,
 )
 from rebalancing_charts import cashflow_comparison_chart, reference_shift_chart
+from trade_log import (
+    TRADE_PRICE_COLUMNS,
+    find_trade_price_column,
+    trade_price_series,
+)
 
 st.set_page_config(page_title="Shannon Demon Dashboard", layout="wide")
-
-TRADE_PRICE_COLUMNS = (
-    "last_price",
-    "price",
-    "decision_last_price",
-    "fill_price",
-    "filled_price",
-    "avg_price",
-    "executed_price",
-)
 
 
 @st.cache_resource
@@ -47,22 +42,6 @@ def load_trades(db: firestore.Client, collection: str, limit: int) -> pd.DataFra
     )
     rows = [doc.to_dict() for doc in docs]
     return pd.json_normalize(rows, sep="_") if rows else pd.DataFrame()
-
-
-def find_trade_price_column(trades: pd.DataFrame) -> str | None:
-    for column in TRADE_PRICE_COLUMNS:
-        if column in trades.columns:
-            return column
-    return None
-
-
-def trade_price_series(trades: pd.DataFrame, price_column: str) -> list[float]:
-    """Chronological positive prices from the (newest-first) trade log."""
-    ordered = trades
-    if "created_at" in trades.columns:
-        ordered = trades.sort_values("created_at")
-    prices = pd.to_numeric(ordered[price_column], errors="coerce")
-    return [float(price) for price in prices if pd.notna(price) and price > 0]
 
 
 def render_reference_chart(fix_c: float, p0: float, excess: float) -> None:
@@ -170,8 +149,9 @@ try:
         )
         if not prices:
             st.info(
-                "ไม่พบคอลัมน์ราคาใน trade log "
-                f"(มองหา: {', '.join(TRADE_PRICE_COLUMNS)}) "
+                "ไม่พบคอลัมน์ราคาที่ใช้งานได้ใน trade log "
+                f"(มองหา: {', '.join(TRADE_PRICE_COLUMNS)} "
+                "รวมถึงคอลัมน์จากข้อมูลซ้อนที่ลงท้ายด้วยชื่อเหล่านี้) "
                 "จึงแสดงเฉพาะเส้นอ้างอิงทางทฤษฎี"
             )
             render_reference_chart(float(guide_fix_c), float(guide_p0), 0.0)
