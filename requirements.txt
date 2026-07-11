@@ -1,4 +1,8 @@
 streamlit>=1.36.0
+altair>=5.0
+# pyarrow 25 segfaults when Streamlit serializes chart data across
+# script-runner threads alongside grpc (google-cloud-firestore)
+pyarrow>=14,<25
 firebase-admin>=6.5.0
 google-cloud-firestore>=2.16.0
 pandas>=2.2.0

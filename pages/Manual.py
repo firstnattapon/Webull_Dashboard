@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 
+import pandas as pd
 import streamlit as st
 
 from manual_tools import (
@@ -16,10 +18,11 @@ from manual_tools import (
     dna_summary,
     encode_dna,
     generate_client_order_id,
-    calculate_rebalancing_curve,
-    rebalancing_scenario_table,
+    rebalancing_reference_curve,
     run_benchmark,
+    simulate_rebalancing_cashflow,
 )
+from rebalancing_charts import cashflow_comparison_chart, reference_shift_chart
 
 
 st.set_page_config(page_title="Manual Test Lab", page_icon="🧪", layout="wide")
@@ -501,105 +504,136 @@ with fix_c_tab:
 
 
 with rebalancing_tab:
-    st.subheader("Rebalancing Learning Guide 101")
+    st.subheader("Rebalancing Learning Guide 101 — ส่วนเกินทุนจาก Rebalancing")
     st.caption(
-        "สรุปหลักจาก rebalancing_learning_guide_101_corrected: ตั้งค่าเป้าหมาย "
-        "FIX_C, ใช้ P0 เป็นราคาอ้างอิง, ปล่อยให้อยู่ในกรอบ DIFF เพื่อเลี่ยงการเทรดถี่ "
-        "และใช้กราฟช่วยดูโซน BUY / PASS / SELL ก่อนส่งคำสั่งจริง"
-    )
-    st.info(
-        "หลักคิด: ถ้ามูลค่าหุ้นต่ำกว่า FIX_C − DIFF ให้เติมกลับ (BUY); "
-        "ถ้าสูงกว่า FIX_C + DIFF ให้ขายส่วนเกิน (SELL); ถ้าอยู่ในกรอบให้ PASS. "
-        "Baseline PnL ใช้สูตร FIX_C × ln(price / P0) เพื่อดูผลเชิง log-return ของแกนราคา"
+        "ตาม rebalancing_learning_guide_101_corrected: สุ่มราคาหลายรอบ "
+        "เปรียบเทียบกระแสเงินสดจาก Rebalancing จริง (Aₙ) กับเส้นอ้างอิง ln (Rₙ) "
+        "แล้วนำส่วนเกินสะสม (Eₙ) ไปวางบนเส้นอ้างอิงตามระดับราคา"
     )
 
-    guide_cols = st.columns(3)
-    guide_quantity = guide_cols[0].number_input(
-        "Guide current quantity", min_value=0.0, value=10.0, format="%.5f"
+    principle_cols = st.columns(2)
+    with principle_cols[0]:
+        st.markdown("#### 1) เส้นอ้างอิงทางทฤษฎี")
+        st.code("Rₙ = Fix_c × ln(Pₙ / P₀)", language=None)
+        st.caption(
+            "กระแสเงินสดอ้างอิงของการรักษามูลค่าสินทรัพย์คงที่แบบต่อเนื่อง: "
+            "ค่าบวกคือรับเงินจากการขาย และค่าลบคือใช้เงินซื้อ"
+        )
+    with principle_cols[1]:
+        st.markdown("#### 2) เส้น Rebalancing จริง")
+        st.code(
+            "Aₙ = Fix_c × Σ [Pᵢ / Pᵢ₋₁ − 1]\nEₙ = Aₙ − Rₙ",
+            language=None,
+        )
+        st.caption(
+            "Aₙ สะสมผลจากทุกช่วงราคาที่เกิดขึ้นจริง "
+            "ส่วน Eₙ คือเงินเกินทุนสะสมเหนือเส้นอ้างอิง"
+        )
+
+    st.markdown("#### Testing Lab — สุ่มราคา 100 รอบ")
+    if "manual_guide_seed" not in st.session_state:
+        st.session_state.manual_guide_seed = 101
+
+    def randomize_guide_seed() -> None:
+        st.session_state.manual_guide_seed = random.randint(0, 999_999_999)
+
+    lab_cols = st.columns(3)
+    guide_fix_c = lab_cols[0].number_input(
+        "Fix_c", min_value=0.01, value=1500.0, step=100.0, format="%.2f"
     )
-    guide_fix_c = guide_cols[1].number_input(
-        "Guide FIX_C", min_value=0.00001, value=1500.0, format="%.2f"
+    guide_p0 = lab_cols[1].number_input(
+        "ราคาเริ่มต้น t₀ (P₀)", min_value=0.01, value=100.0, format="%.5f"
     )
-    guide_p0 = guide_cols[2].number_input(
-        "Guide P0", min_value=0.00001, value=100.0, format="%.5f"
+    guide_vol = lab_cols[2].number_input(
+        "ความผันผวน/รอบ (%)",
+        min_value=0.0, max_value=40.0, value=4.0, step=0.1,
     )
-    guide_cols = st.columns(3)
-    guide_diff = guide_cols[0].number_input(
-        "Guide DIFF", min_value=0.0, value=30.0, format="%.2f"
+    lab_cols = st.columns(3)
+    guide_drift = lab_cols[0].number_input(
+        "แนวโน้ม/รอบ (%)", min_value=-10.0, max_value=10.0, value=0.0, step=0.01
     )
-    guide_price_min = guide_cols[1].number_input(
-        "Chart price min", min_value=0.00001, value=50.0, format="%.5f"
+    guide_steps = lab_cols[1].number_input(
+        "จำนวนรอบ", min_value=2, max_value=500, value=100, step=1
     )
-    guide_price_max = guide_cols[2].number_input(
-        "Chart price max", min_value=0.00001, value=150.0, format="%.5f"
+    guide_seed = lab_cols[2].number_input(
+        "Seed", min_value=0, step=1, key="manual_guide_seed"
     )
+    st.button("สุ่ม Seed ใหม่", on_click=randomize_guide_seed)
 
     try:
-        curve_rows = calculate_rebalancing_curve(
-            float(guide_fix_c), float(guide_p0), float(guide_diff),
-            float(guide_price_min), float(guide_price_max), steps=80,
+        sim_rows = simulate_rebalancing_cashflow(
+            float(guide_fix_c),
+            float(guide_p0),
+            float(guide_vol) / 100.0,
+            float(guide_drift) / 100.0,
+            int(guide_steps),
+            int(guide_seed),
         )
-        width, height, pad = 760, 320, 36
-        series = {
-            "FIX_C target": ("#2563eb", [row["target_position_value"] for row in curve_rows]),
-            "Lower DIFF band": ("#dc2626", [row["band_low"] for row in curve_rows]),
-            "Upper DIFF band": ("#16a34a", [row["band_high"] for row in curve_rows]),
-            "Portfolio log-value": ("#9333ea", [row["portfolio_value"] for row in curve_rows]),
-        }
-        prices = [row["price"] for row in curve_rows]
-        all_values = [value for _, values in series.values() for value in values]
-        min_price, max_price = min(prices), max(prices)
-        min_value, max_value = min(all_values), max(all_values)
-
-        def x_pos(price: float) -> float:
-            return pad + (price - min_price) / (max_price - min_price) * (width - 2 * pad)
-
-        def y_pos(value: float) -> float:
-            span = max(max_value - min_value, 1.0)
-            return height - pad - (value - min_value) / span * (height - 2 * pad)
-
-        polylines = []
-        legend = []
-        for label, (color, values) in series.items():
-            points = " ".join(
-                f"{x_pos(price):.1f},{y_pos(value):.1f}"
-                for price, value in zip(prices, values)
-            )
-            polylines.append(
-                f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="2.5" />'
-            )
-            legend.append(
-                f'<span style="display:inline-flex;align-items:center;margin-right:18px;">'
-                f'<span style="width:12px;height:12px;background:{color};display:inline-block;margin-right:6px;"></span>'
-                f'{label}</span>'
-            )
-        svg_html = f"""<div style="width:100%;overflow-x:auto;">
-            <svg viewBox="0 0 {width} {height}" style="max-width:100%;background:#fff;border:1px solid #e5e7eb;border-radius:8px;">
-                <line x1="{pad}" y1="{height-pad}" x2="{width-pad}" y2="{height-pad}" stroke="#9ca3af" />
-                <line x1="{pad}" y1="{pad}" x2="{pad}" y2="{height-pad}" stroke="#9ca3af" />
-                {''.join(polylines)}
-                <text x="{pad}" y="22" font-size="12" fill="#374151">Rebalancing Guide Chart</text>
-                <text x="{width-pad-110}" y="{height-10}" font-size="11" fill="#6b7280">Price</text>
-                <text x="8" y="{pad-10}" font-size="11" fill="#6b7280">USD</text>
-            </svg>
-            <div style="font-size:13px;margin-top:8px;">{''.join(legend)}</div>
-        </div>"""
-        st.html(svg_html)
-
-        scenario_rows = rebalancing_scenario_table(
-            float(guide_quantity), float(guide_fix_c), float(guide_p0),
-            float(guide_diff), float(guide_price_min), float(guide_price_max),
-            steps=9,
+        final_row = sim_rows[-1]
+        stat_cols = st.columns(4)
+        stat_cols[0].metric("ราคาสุดท้าย Pₙ", f"{final_row['price']:,.2f}")
+        stat_cols[1].metric(
+            "Rebalancing Aₙ", f"{final_row['actual_cumulative']:+,.2f}"
         )
-        st.markdown("#### Decision scenarios from the chart")
-        st.json(scenario_rows)
+        stat_cols[2].metric("อ้างอิง Rₙ", f"{final_row['ln_reference']:+,.2f}")
+        stat_cols[3].metric("ส่วนเกินสะสม Eₙ", f"{final_row['excess']:+,.2f}")
 
-        st.markdown("#### Checklist ก่อนกด order")
-        st.markdown(
-            "- ยืนยันว่า quote ล่าสุดและ position มาจาก endpoint/account ที่ถูกต้อง\n"
-            "- ใช้ DIFF เป็นกันชนค่าธรรมเนียม/สเปรด/ความผันผวน ไม่ควรตั้งแคบเกินไป\n"
-            "- Preview order ก่อนเสมอ และใช้ Production เฉพาะเมื่อ confirmation ตรงครบถ้วน\n"
-            "- ทบทวนขนาด order_quantity จากตาราง scenario เทียบกับ buying power/position จริง"
+        st.markdown("#### กราฟที่ 1 — เปรียบเทียบตามลำดับ Rebalance")
+        st.altair_chart(
+            cashflow_comparison_chart(sim_rows), use_container_width=True
+        )
+
+        st.markdown("#### กราฟที่ 2 — เงินทุนเทียบกับระดับราคา")
+        st.code(
+            "แกน X: ราคา x ตั้งแต่ 0 ถึง 2t₀\n"
+            "Y₁(x) = Fix_c × ln(x / t₀)   ← เส้นอ้างอิง\n"
+            "Y₂(x) = Y₁(x) + Eₙ           ← เส้นอ้างอิง + เงินเกินทุนสะสม",
+            language=None,
+        )
+        curve_rows = rebalancing_reference_curve(
+            float(guide_fix_c), float(guide_p0), float(final_row["excess"]),
+            points=300,
+        )
+        st.altair_chart(
+            reference_shift_chart(curve_rows, float(guide_p0)),
+            use_container_width=True,
+        )
+        st.warning(
+            "จุดสำคัญ: แกนราคาเริ่มแสดงที่ 0 ตามโจทย์ แต่ไม่ลากเส้นที่ x = 0 "
+            "เพราะ ln(0) ไม่มีค่าจำกัด (มุ่งสู่ −∞) การคำนวณเส้นจึงเริ่มที่ค่าบวก"
+            "เล็ก ๆ ใกล้ศูนย์ ส่วน Y₂ เป็นเส้น Y₁ ที่เลื่อนขึ้นในแนวตั้งเท่ากับ Eₙ "
+            "จึงมีช่องว่างคงที่เท่ากับส่วนเกินสะสม"
+        )
+        st.success(
+            "การอ่านเครื่องหมาย: ตามสมการ ln(x/t₀) ค่าบวกหมายถึงเงินสดที่ได้รับ"
+            "จากการขาย และค่าลบหมายถึงเงินสดที่ใช้ซื้อ หากต้องการให้ "
+            "“เงินทุนที่ใช้ซื้อ” เป็นบวก ต้องกลับเครื่องหมายเป็น Fix_c × ln(t₀/x) "
+            "ซึ่งเป็นคนละ convention"
+        )
+
+        st.markdown("#### ข้อมูลการทดสอบ")
+        sim_frame = pd.DataFrame(sim_rows)
+        st.dataframe(
+            sim_frame.rename(columns={
+                "step": "รอบ",
+                "price": "ราคา",
+                "delta_actual": "ΔA รอบนี้",
+                "actual_cumulative": "Aₙ",
+                "ln_reference": "Rₙ",
+                "excess": "Eₙ",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.download_button(
+            "ดาวน์โหลด CSV",
+            data=sim_frame.to_csv(index=False),
+            file_name="rebalancing_test.csv",
+            mime="text/csv",
+        )
+        st.caption(
+            "แบบจำลองเพื่อการเรียนรู้ · ยังไม่รวมค่าธรรมเนียม spread, slippage "
+            "และภาษี"
         )
     except Exception as exc:
         render_error(exc)
