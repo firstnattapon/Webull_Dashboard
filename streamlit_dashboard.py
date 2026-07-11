@@ -23,6 +23,7 @@ TRADE_PRICE_COLUMNS = (
     "filled_price",
     "avg_price",
     "executed_price",
+    "market_state_last_price",
 )
 
 
