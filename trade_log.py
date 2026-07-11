@@ -95,9 +95,42 @@ _LOGGED_LABELS: tuple[tuple[str, str], ...] = (
     ("decision_rebalance", "ส่วนต่างเป้าหมาย (USD)"),
 )
 _PRICE_LABEL = "ราคา Pₙ (USD)"
+_REBALANCE_LABEL = "ส่วนต่างเป้าหมาย (USD)"
 # Logged USD amounts carry float noise (e.g. 11.311520399999836); round the
 # money-valued logged columns so the table reads cleanly.
-_ROUNDED_LOGGED_LABELS = frozenset({"มูลค่าพอร์ต (USD)", "ส่วนต่างเป้าหมาย (USD)"})
+_ROUNDED_LOGGED_LABELS = frozenset({"มูลค่าพอร์ต (USD)", _REBALANCE_LABEL})
+
+
+def signed_rebalance_series(ordered: pd.DataFrame, fix_c: float) -> pd.Series:
+    """ส่วนต่างเป้าหมาย with a portfolio-adjustment sign: sell = −, buy = +.
+
+    The bot logs ``decision_rebalance`` as ``abs(fix_c − value_now)``
+    (strategy.py), losing the direction. The sign is restored from
+    ``decision_side`` (SELL → −, BUY → +); PASS rows fall back to comparing
+    the logged portfolio value against ``fix_c``. Note this is the opposite
+    convention to the cash-flow columns ΔAₙ/Aₙ, where + is cash received
+    from selling — here + means "money to add" (buy) and − "to take out"
+    (sell).
+    """
+    magnitude = pd.to_numeric(
+        ordered.get("decision_rebalance"), errors="coerce"
+    ).abs()
+    side = ordered.get(
+        "decision_side", pd.Series(None, index=ordered.index, dtype=object)
+    )
+    value_now = pd.to_numeric(
+        ordered.get("decision_value_now_usd"), errors="coerce"
+    )
+    sign = np.where(
+        side == "SELL",
+        -1.0,
+        np.where(
+            side == "BUY",
+            1.0,
+            np.where(value_now.notna() & (value_now > fix_c), -1.0, 1.0),
+        ),
+    )
+    return (magnitude * sign).round(2)
 
 
 def build_trade_log_display(
@@ -141,9 +174,13 @@ def build_trade_log_display(
     def add_logged(source: str, label: str) -> None:
         if source not in ordered.columns:
             return
-        series = ordered[source]
-        if label in _ROUNDED_LOGGED_LABELS:
-            series = pd.to_numeric(series, errors="coerce").round(2)
+        if label == _REBALANCE_LABEL:
+            # Restore the direction the bot's abs() dropped: sell = −, buy = +.
+            series = signed_rebalance_series(ordered, fix_c)
+        else:
+            series = ordered[source]
+            if label in _ROUNDED_LOGGED_LABELS:
+                series = pd.to_numeric(series, errors="coerce").round(2)
         columns[(GROUP_LOGGED, label)] = series.to_numpy()
 
     for source, label in _LOGGED_LABELS:
