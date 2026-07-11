@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -12,7 +13,6 @@ from manual_tools import (
     WebullResponseError,
     build_market_order_payload,
     calculate_shannon_decision,
-    calculate_rebalancing_curve,
     decode_dna,
     decode_number_stream,
     dna_summary,
@@ -21,9 +21,12 @@ from manual_tools import (
     extract_quantity,
     format_order_quantity,
     generate_client_order_id,
+    rebalancing_cashflow_from_prices,
+    rebalancing_reference_curve,
     response_json_or_raise,
-    rebalancing_scenario_table,
     run_benchmark,
+    simulate_rebalancing_cashflow,
+    simulate_rebalancing_prices,
 )
 
 
@@ -79,23 +82,106 @@ def test_bypass_dna(code, length):
     assert decode_dna(code).tolist() == [1] * length
 
 
-def test_rebalancing_curve_models_constant_value_bands():
-    rows = calculate_rebalancing_curve(1000.0, 100.0, 50.0, 50.0, 150.0, steps=3)
-    assert [round(row["price"], 2) for row in rows] == [50.0, 100.0, 150.0]
-    assert rows[1]["quantity"] == 10.0
-    assert rows[1]["target_position_value"] == 1000.0
-    assert rows[1]["band_low"] == 950.0
-    assert rows[1]["band_high"] == 1050.0
-    assert rows[0]["action"] == "BUY_ZONE"
-    assert rows[1]["action"] == "ANCHOR"
-    assert rows[2]["action"] == "SELL_ZONE"
+def test_cashflow_table_follows_guide_formulas():
+    prices = [110.0, 99.0, 120.0]
+    rows = rebalancing_cashflow_from_prices(prices, 1500.0, 100.0)
+
+    assert rows[0] == {
+        "step": 0,
+        "price": 100.0,
+        "delta_actual": 0.0,
+        "actual_cumulative": 0.0,
+        "ln_reference": 0.0,
+        "excess": 0.0,
+    }
+    previous = 100.0
+    actual = 0.0
+    for row, price in zip(rows[1:], prices):
+        expected_delta = 1500.0 * (price / previous - 1.0)
+        actual += expected_delta
+        assert row["price"] == price
+        assert row["delta_actual"] == pytest.approx(expected_delta)
+        assert row["actual_cumulative"] == pytest.approx(actual)
+        assert row["ln_reference"] == pytest.approx(
+            1500.0 * math.log(price / 100.0)
+        )
+        assert row["excess"] == pytest.approx(
+            row["actual_cumulative"] - row["ln_reference"]
+        )
+        previous = price
 
 
-def test_rebalancing_scenario_table_uses_logical_fix_c_rules():
-    rows = rebalancing_scenario_table(10.0, 1000.0, 100.0, 50.0, 50.0, 150.0, steps=3)
-    assert [row["action"] for row in rows] == ["BUY", "PASS", "SELL"]
-    assert rows[0]["order_quantity"] == 10.0
-    assert rows[2]["order_quantity"] == pytest.approx(500.0 / 150.0, abs=1e-5)
+def test_cashflow_table_rejects_non_positive_prices():
+    with pytest.raises(ValueError, match="price"):
+        rebalancing_cashflow_from_prices([100.0, 0.0], 1500.0, 100.0)
+    with pytest.raises(ValueError):
+        rebalancing_cashflow_from_prices([100.0], -1.0, 100.0)
+
+
+def test_price_simulation_is_deterministic_per_seed():
+    first = simulate_rebalancing_prices(100.0, 0.04, 0.0, 100, 101)
+    second = simulate_rebalancing_prices(100.0, 0.04, 0.0, 100, 101)
+    other_seed = simulate_rebalancing_prices(100.0, 0.04, 0.0, 100, 102)
+
+    assert len(first) == 100
+    assert first == second
+    assert first != other_seed
+    assert all(price > 0 for price in first)
+
+
+def test_price_simulation_with_zero_vol_follows_drift_only():
+    flat = simulate_rebalancing_prices(100.0, 0.0, 0.0, 5, 7)
+    assert flat == pytest.approx([100.0] * 5)
+
+    trending = simulate_rebalancing_prices(100.0, 0.0, 0.01, 3, 7)
+    assert trending == pytest.approx(
+        [100.0 * math.exp(0.01 * n) for n in (1, 2, 3)]
+    )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"p0": 0.0},
+        {"vol": -0.1},
+        {"steps": 1},
+        {"steps": 501},
+    ],
+)
+def test_price_simulation_rejects_invalid_inputs(kwargs):
+    params = {"p0": 100.0, "vol": 0.04, "drift": 0.0, "steps": 100, "seed": 1}
+    params.update(kwargs)
+    with pytest.raises(ValueError):
+        simulate_rebalancing_prices(**params)
+
+
+def test_simulated_cashflow_keeps_excess_identity():
+    rows = simulate_rebalancing_cashflow(1500.0, 100.0, 0.04, 0.0, 100, 101)
+    assert len(rows) == 101
+    for row in rows:
+        assert row["excess"] == pytest.approx(
+            row["actual_cumulative"] - row["ln_reference"]
+        )
+
+
+def test_reference_curve_shifts_reference_by_constant_excess():
+    rows = rebalancing_reference_curve(1500.0, 100.0, 250.0, points=50)
+
+    assert rows[0]["price"] == pytest.approx(0.2)
+    assert rows[-1]["price"] == pytest.approx(200.0)
+    for row in rows:
+        assert row["price"] > 0
+        assert row["y_reference"] == pytest.approx(
+            1500.0 * math.log(row["price"] / 100.0)
+        )
+        assert row["y_rebalanced"] - row["y_reference"] == pytest.approx(250.0)
+
+
+def test_reference_curve_rejects_invalid_inputs():
+    with pytest.raises(ValueError):
+        rebalancing_reference_curve(0.0, 100.0, 0.0)
+    with pytest.raises(ValueError):
+        rebalancing_reference_curve(1500.0, 100.0, 0.0, points=1)
 
 
 @pytest.mark.parametrize(

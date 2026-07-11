@@ -106,91 +106,131 @@ class ShannonDecision:
         return payload
 
 
-@dataclass(frozen=True)
-class RebalancingPoint:
-    price: float
-    quantity: float
-    position_value: float
-    portfolio_value: float
-    band_low: float
-    band_high: float
-    action: str
+MAX_REBALANCING_STEPS = 500
+REFERENCE_CURVE_PRICE_FLOOR_RATIO = 0.002
 
 
-def calculate_rebalancing_curve(
+def rebalancing_cashflow_from_prices(
+    prices: Iterable[float],
     fix_c: float,
     p0: float,
-    diff: float,
-    price_min: float,
-    price_max: float,
-    steps: int = 60,
-) -> list[dict[str, float | str]]:
-    """Build the constant-value rebalancing guide curve used by the UI.
+) -> list[dict[str, float]]:
+    """Cash-flow table of the corrected Learning Guide 101.
 
-    The curve models the guide principle as a target stock value ``FIX_C``.
-    At each price the ideal holding is ``FIX_C / price`` while the cash/log
-    reserve follows Shannon's constant-rebalanced approximation
-    ``FIX_C * log(price / P0)``. The DIFF band marks the no-trade zone.
+    Step 0 anchors at ``P0``. For every observed price ``Pᵢ`` afterwards:
+    ``ΔAᵢ = Fix_c × (Pᵢ/Pᵢ₋₁ − 1)`` accumulates into the actual rebalancing
+    line ``Aₙ``, the theoretical reference is ``Rₙ = Fix_c × ln(Pₙ/P₀)``,
+    and the cumulative excess is ``Eₙ = Aₙ − Rₙ``. Positive values are cash
+    received from selling; negative values are cash spent buying.
     """
-    numeric_values = (fix_c, p0, diff, price_min, price_max)
-    if not all(math.isfinite(float(value)) for value in numeric_values):
-        raise ValueError("All numeric inputs must be finite")
-    if fix_c <= 0 or p0 <= 0 or price_min <= 0 or price_max <= 0:
-        raise ValueError("fix_c, p0, price_min, and price_max must be greater than 0")
-    if diff < 0:
-        raise ValueError("diff cannot be negative")
-    if price_min >= price_max:
-        raise ValueError("price_min must be less than price_max")
-    if steps < 2 or steps > 500:
-        raise ValueError("steps must be between 2 and 500")
+    if not math.isfinite(float(fix_c)) or not math.isfinite(float(p0)):
+        raise ValueError("fix_c and p0 must be finite")
+    if fix_c <= 0 or p0 <= 0:
+        raise ValueError("fix_c and p0 must be greater than 0")
 
-    prices = np.linspace(float(price_min), float(price_max), int(steps))
-    rows: list[dict[str, float | str]] = []
-    for price in prices:
-        quantity = fix_c / float(price)
-        baseline_pnl = fix_c * math.log(float(price) / p0)
-        portfolio_value = fix_c + baseline_pnl
+    rows: list[dict[str, float]] = [{
+        "step": 0,
+        "price": float(p0),
+        "delta_actual": 0.0,
+        "actual_cumulative": 0.0,
+        "ln_reference": 0.0,
+        "excess": 0.0,
+    }]
+    previous = float(p0)
+    actual = 0.0
+    for step, raw_price in enumerate(prices, start=1):
+        price = float(raw_price)
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError("Every price must be finite and greater than 0")
+        delta = fix_c * (price / previous - 1.0)
+        actual += delta
+        reference = fix_c * math.log(price / p0)
         rows.append({
-            "price": float(price),
-            "quantity": float(quantity),
-            "target_position_value": float(fix_c),
-            "portfolio_value": float(portfolio_value),
-            "band_low": float(fix_c - diff),
-            "band_high": float(fix_c + diff),
-            "action": "BUY_ZONE" if float(price) < p0 else "SELL_ZONE" if float(price) > p0 else "ANCHOR",
+            "step": step,
+            "price": price,
+            "delta_actual": float(delta),
+            "actual_cumulative": float(actual),
+            "ln_reference": float(reference),
+            "excess": float(actual - reference),
         })
+        previous = price
     return rows
 
 
-def rebalancing_scenario_table(
-    quantity: float,
+def simulate_rebalancing_prices(
+    p0: float,
+    vol: float,
+    drift: float,
+    steps: int,
+    seed: int,
+) -> list[float]:
+    """Random price path of the guide's Testing Lab (geometric Brownian step).
+
+    ``Pᵢ = Pᵢ₋₁ × exp((drift − vol²/2) + vol × Z)`` with a deterministic
+    seed, floored at ``P0 × 1e-8`` so the log reference stays defined.
+    """
+    numeric_values = (p0, vol, drift)
+    if not all(math.isfinite(float(value)) for value in numeric_values):
+        raise ValueError("p0, vol, and drift must be finite")
+    if p0 <= 0:
+        raise ValueError("p0 must be greater than 0")
+    if vol < 0:
+        raise ValueError("vol cannot be negative")
+    if steps < 2 or steps > MAX_REBALANCING_STEPS:
+        raise ValueError(f"steps must be between 2 and {MAX_REBALANCING_STEPS}")
+
+    rng = np.random.default_rng(int(seed))
+    prices: list[float] = []
+    price = float(p0)
+    for _ in range(int(steps)):
+        shock = (drift - 0.5 * vol * vol) + vol * float(rng.standard_normal())
+        price = max(price * math.exp(shock), p0 * 1e-8)
+        prices.append(price)
+    return prices
+
+
+def simulate_rebalancing_cashflow(
     fix_c: float,
     p0: float,
-    diff: float,
-    price_min: float,
-    price_max: float,
-    steps: int = 9,
-    decimal_precision: int = DEFAULT_ORDER_DECIMAL_PRECISION,
-) -> list[dict[str, float | str | None]]:
-    """Evaluate BUY/PASS/SELL decisions across a price grid for the guide."""
-    if steps < 2 or steps > 100:
-        raise ValueError("steps must be between 2 and 100")
-    prices = np.linspace(float(price_min), float(price_max), int(steps))
-    rows: list[dict[str, float | str | None]] = []
-    for price in prices:
-        decision = calculate_shannon_decision(
-            quantity, float(price), fix_c, p0, diff, decimal_precision
-        )
+    vol: float,
+    drift: float,
+    steps: int,
+    seed: int,
+) -> list[dict[str, float]]:
+    """Run the guide's Testing Lab: random prices + cash-flow table."""
+    prices = simulate_rebalancing_prices(p0, vol, drift, steps, seed)
+    return rebalancing_cashflow_from_prices(prices, fix_c, p0)
+
+
+def rebalancing_reference_curve(
+    fix_c: float,
+    p0: float,
+    excess: float,
+    points: int = 200,
+) -> list[dict[str, float]]:
+    """Chart 2 of the corrected guide: capital versus price level.
+
+    ``Y₁(x) = Fix_c × ln(x/P0)`` is the reference line and
+    ``Y₂(x) = Y₁(x) + Eₙ`` places the cumulative excess on top of it as a
+    constant vertical gap. The price axis conceptually starts at 0 but the
+    curve starts at a small positive price because ``ln(0)`` diverges.
+    """
+    numeric_values = (fix_c, p0, excess)
+    if not all(math.isfinite(float(value)) for value in numeric_values):
+        raise ValueError("fix_c, p0, and excess must be finite")
+    if fix_c <= 0 or p0 <= 0:
+        raise ValueError("fix_c and p0 must be greater than 0")
+    if points < 2 or points > 2000:
+        raise ValueError("points must be between 2 and 2000")
+
+    start = p0 * REFERENCE_CURVE_PRICE_FLOOR_RATIO
+    rows: list[dict[str, float]] = []
+    for x in np.linspace(start, 2.0 * p0, int(points)):
+        y_reference = fix_c * math.log(float(x) / p0)
         rows.append({
-            "price": float(price),
-            "current_quantity": float(quantity),
-            "value_now_usd": decision.value_now_usd,
-            "action": decision.action,
-            "side": decision.side,
-            "order_quantity": decision.order_quantity,
-            "rebalance_amount": decision.rebalance_amount,
-            "baseline_pnl": decision.baseline_pnl,
-            "reason": decision.reason,
+            "price": float(x),
+            "y_reference": float(y_reference),
+            "y_rebalanced": float(y_reference + excess),
         })
     return rows
 
