@@ -106,6 +106,95 @@ class ShannonDecision:
         return payload
 
 
+@dataclass(frozen=True)
+class RebalancingPoint:
+    price: float
+    quantity: float
+    position_value: float
+    portfolio_value: float
+    band_low: float
+    band_high: float
+    action: str
+
+
+def calculate_rebalancing_curve(
+    fix_c: float,
+    p0: float,
+    diff: float,
+    price_min: float,
+    price_max: float,
+    steps: int = 60,
+) -> list[dict[str, float | str]]:
+    """Build the constant-value rebalancing guide curve used by the UI.
+
+    The curve models the guide principle as a target stock value ``FIX_C``.
+    At each price the ideal holding is ``FIX_C / price`` while the cash/log
+    reserve follows Shannon's constant-rebalanced approximation
+    ``FIX_C * log(price / P0)``. The DIFF band marks the no-trade zone.
+    """
+    numeric_values = (fix_c, p0, diff, price_min, price_max)
+    if not all(math.isfinite(float(value)) for value in numeric_values):
+        raise ValueError("All numeric inputs must be finite")
+    if fix_c <= 0 or p0 <= 0 or price_min <= 0 or price_max <= 0:
+        raise ValueError("fix_c, p0, price_min, and price_max must be greater than 0")
+    if diff < 0:
+        raise ValueError("diff cannot be negative")
+    if price_min >= price_max:
+        raise ValueError("price_min must be less than price_max")
+    if steps < 2 or steps > 500:
+        raise ValueError("steps must be between 2 and 500")
+
+    prices = np.linspace(float(price_min), float(price_max), int(steps))
+    rows: list[dict[str, float | str]] = []
+    for price in prices:
+        quantity = fix_c / float(price)
+        baseline_pnl = fix_c * math.log(float(price) / p0)
+        portfolio_value = fix_c + baseline_pnl
+        rows.append({
+            "price": float(price),
+            "quantity": float(quantity),
+            "target_position_value": float(fix_c),
+            "portfolio_value": float(portfolio_value),
+            "band_low": float(fix_c - diff),
+            "band_high": float(fix_c + diff),
+            "action": "BUY_ZONE" if float(price) < p0 else "SELL_ZONE" if float(price) > p0 else "ANCHOR",
+        })
+    return rows
+
+
+def rebalancing_scenario_table(
+    quantity: float,
+    fix_c: float,
+    p0: float,
+    diff: float,
+    price_min: float,
+    price_max: float,
+    steps: int = 9,
+    decimal_precision: int = DEFAULT_ORDER_DECIMAL_PRECISION,
+) -> list[dict[str, float | str | None]]:
+    """Evaluate BUY/PASS/SELL decisions across a price grid for the guide."""
+    if steps < 2 or steps > 100:
+        raise ValueError("steps must be between 2 and 100")
+    prices = np.linspace(float(price_min), float(price_max), int(steps))
+    rows: list[dict[str, float | str | None]] = []
+    for price in prices:
+        decision = calculate_shannon_decision(
+            quantity, float(price), fix_c, p0, diff, decimal_precision
+        )
+        rows.append({
+            "price": float(price),
+            "current_quantity": float(quantity),
+            "value_now_usd": decision.value_now_usd,
+            "action": decision.action,
+            "side": decision.side,
+            "order_quantity": decision.order_quantity,
+            "rebalance_amount": decision.rebalance_amount,
+            "baseline_pnl": decision.baseline_pnl,
+            "reason": decision.reason,
+        })
+    return rows
+
+
 def decode_number_stream(encoded: str) -> list[int]:
     """Decode the compact ``[width][value]`` number stream."""
     if not encoded or not encoded.isdigit():

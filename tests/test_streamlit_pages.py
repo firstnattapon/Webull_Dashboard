@@ -16,7 +16,7 @@ def test_manual_page_loads_with_uat_and_blank_credentials():
 
     assert not app.exception
     assert app.title[0].value == "🧪 Manual Test Lab"
-    assert len(app.tabs) == 6
+    assert len(app.tabs) == 7
     assert app.sidebar.selectbox[0].value == "Test (UAT)"
     assert app.sidebar.text_input[0].value == ""
     assert app.sidebar.text_input[1].value == ""
