@@ -16,11 +16,16 @@ def test_manual_page_loads_with_uat_and_blank_credentials():
 
     assert not app.exception
     assert app.title[0].value == "🧪 Manual Test Lab"
-    assert len(app.tabs) == 7
+    assert len(app.tabs) == 8
+    assert app.radio[0].value == "Rebalancing 101"
     assert app.sidebar.selectbox[0].value == "Test (UAT)"
     assert app.sidebar.text_input[0].value == ""
     assert app.sidebar.text_input[1].value == ""
     assert app.sidebar.text_input[2].value == ""
+
+    app.radio[0].set_value("Rebalancing Playground").run(timeout=30)
+    assert not app.exception
+    assert app.radio[0].value == "Rebalancing Playground"
 
 
 def test_clear_credentials_callback_clears_all_secret_widgets():

@@ -5,7 +5,8 @@ Lab** สำหรับทดสอบ Webull, DNA, Logical FIX_C และ ben
 
 Manual Test Lab รองรับ connection/quote, account list, balance, positions,
 order preview/place, open orders, history, detail, cancel, DNA encode/decode,
-Logical FIX_C และ local benchmark
+Logical FIX_C, local benchmark และแท็บ Web Apps ที่รวมคู่มือ Rebalancing 101
+กับ Rebalancing Playground แบบโต้ตอบไว้ในหน้าเดียว
 
 ## Run locally
 

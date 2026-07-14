@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import random
 import time
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from manual_tools import (
     ConnectionSettings,
@@ -23,6 +25,9 @@ from manual_tools import (
     simulate_rebalancing_cashflow,
 )
 from rebalancing_charts import cashflow_comparison_chart, reference_shift_chart
+
+
+WEB_APPS_DIR = Path(__file__).resolve().parents[1] / "web_apps"
 
 
 st.set_page_config(page_title="Manual Test Lab", page_icon="🧪", layout="wide")
@@ -51,6 +56,17 @@ def current_settings() -> ConnectionSettings:
 
 def render_error(exc: Exception) -> None:
     st.error(f"{exc.__class__.__name__}: {exc}")
+
+
+def render_web_app(filename: str, *, height: int = 900) -> None:
+    """Render a bundled, self-contained HTML app in an isolated iframe."""
+    app_path = WEB_APPS_DIR / filename
+    try:
+        app_html = app_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        render_error(exc)
+        return
+    components.html(app_html, height=height, scrolling=True)
 
 
 def require_credentials() -> ConnectionSettings | None:
@@ -125,6 +141,7 @@ with st.sidebar:
     dna_tab,
     fix_c_tab,
     rebalancing_tab,
+    web_apps_tab,
     benchmark_tab,
 ) = st.tabs(
     [
@@ -134,6 +151,7 @@ with st.sidebar:
         "DNA",
         "Logical FIX_C",
         "Rebalancing 101",
+        "🌐 Web Apps",
         "Benchmark",
     ]
 )
@@ -637,6 +655,25 @@ with rebalancing_tab:
         )
     except Exception as exc:
         render_error(exc)
+
+
+with web_apps_tab:
+    st.subheader("Interactive Rebalancing Web Apps")
+    st.caption(
+        "เปิดคู่มือและ playground แบบโต้ตอบได้จาก Manual Test Lab "
+        "โดยทำงานอยู่ใน iframe แยกจาก Webull credentials"
+    )
+    selected_web_app = st.radio(
+        "เลือก Web App",
+        options=("Rebalancing 101", "Rebalancing Playground"),
+        horizontal=True,
+        label_visibility="collapsed",
+        key="manual_web_app_choice",
+    )
+    if selected_web_app == "Rebalancing 101":
+        render_web_app("rebalancing101.html")
+    else:
+        render_web_app("rebalancing_playground.html")
 
 
 with benchmark_tab:
