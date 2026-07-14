@@ -1,20 +1,17 @@
-"""Trade-log price extraction for the Shannon Demon dashboard.
+"""Market-price display and broker-confirmed cash-flow for the dashboard.
 
-The bot (firstnattapon/webull) logs each rebalance with the executed price
-at the top level (``last_price``) and nested under ``market_state``. Older
-documents carry only the nested form, which ``pd.json_normalize(sep="_")``
-flattens to ``market_state_last_price`` — so the lookup accepts the exact
-names first and any flattened ``*_<name>`` column as a fallback.
+``last_price`` is a decision-time quote used only by the Learning Guide's
+what-if chart.  Realized cash requires a terminal fill, reconciled Positions,
+positive filled quantity, and a separately logged execution price.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
 import pandas as pd
-
-from manual_tools import rebalancing_cashflow_from_prices
 
 TRADE_PRICE_COLUMNS = (
     "last_price",
@@ -26,6 +23,190 @@ TRADE_PRICE_COLUMNS = (
     "avg_price",
     "executed_price",
 )
+
+# Execution prices deliberately exclude ``last_price``/``price``.  Those are
+# decision-time market quotes and cannot prove how much cash the broker
+# actually exchanged.  The bot may add any of these names at the top level or
+# under a flattened order/order-status payload.
+EXECUTION_PRICE_COLUMNS = (
+    "average_filled_price",
+    "average_fill_price",
+    "avg_filled_price",
+    "avg_fill_price",
+    "filled_price",
+    "fill_price",
+    "executed_price",
+    "execution_price",
+)
+
+FILLED_QUANTITY_COLUMNS = (
+    "filled_quantity",
+    "cumulative_filled_quantity",
+    "filled_qty",
+)
+
+FEE_COLUMNS = (
+    "transaction_fee",
+    "filled_fee",
+    "execution_fee",
+    "commission",
+)
+
+REALIZED_TERMINAL_STATUSES = frozenset({
+    "ORDER_FILLED",
+    "ORDER_PARTIAL_FILLED_TERMINAL",
+    # Compatibility for a directly-normalized broker document.  The position
+    # reconciliation requirement below remains mandatory.
+    "FILLED",
+})
+
+
+def _candidate_columns(columns, names: tuple[str, ...]) -> list[str]:
+    """Exact names first, then flattened ``*_<name>`` variants."""
+    candidates = [name for name in names if name in columns]
+    for name in names:
+        suffix = f"_{name}"
+        for column in columns:
+            if column.endswith(suffix) and column not in candidates:
+                candidates.append(column)
+    return candidates
+
+
+def _coalesced_numeric(frame: pd.DataFrame, names: tuple[str, ...]) -> pd.Series:
+    """First finite numeric value per row from a prioritized field list."""
+    result = pd.Series(np.nan, index=frame.index, dtype=float)
+    for column in _candidate_columns(frame.columns, names):
+        values = pd.to_numeric(frame[column], errors="coerce")
+        result = result.where(result.notna(), values)
+    return result
+
+
+def _coalesced_text(frame: pd.DataFrame, names: tuple[str, ...]) -> pd.Series:
+    result = pd.Series(None, index=frame.index, dtype=object)
+    for column in _candidate_columns(frame.columns, names):
+        values = frame[column]
+        usable = values.notna() & values.astype(str).str.strip().ne("")
+        result = result.where(result.notna() | ~usable, values)
+    return result
+
+
+def realized_cashflow_from_trades(
+    trades: pd.DataFrame,
+    fix_c: float,
+    p0: float,
+) -> pd.DataFrame:
+    """Build a gross-cash ledger from broker-confirmed execution events.
+
+    A row is eligible only when all facts required by ``webull/doc`` agree:
+    terminal filled status, positive cumulative filled quantity, a real
+    execution price, and ``position_reconciled is True``.  Decision-time
+    quotes never substitute for a missing execution price.
+
+    Webull reports cumulative fill quantity.  Repeated lifecycle snapshots for
+    the same ``client_order_id`` are converted to incremental notional so a
+    partial fill cannot be counted twice.  Fees are subtracted when the log
+    exposes a cumulative fee; otherwise the result is explicitly gross cash.
+    Non-execution rows carry the last cumulative values without moving them.
+    """
+    if not math.isfinite(float(fix_c)) or not math.isfinite(float(p0)):
+        raise ValueError("fix_c and p0 must be finite")
+    if fix_c <= 0 or p0 <= 0:
+        raise ValueError("fix_c and p0 must be greater than 0")
+
+    ordered = trades.copy()
+    if "created_at" in ordered.columns:
+        ordered = ordered.sort_values("created_at")
+    ordered = ordered.reset_index(drop=True)
+
+    statuses = (
+        _coalesced_text(ordered, ("status",))
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+    sides = (
+        _coalesced_text(ordered, ("side", "decision_side"))
+        .fillna("")
+        .astype(str)
+        .str.upper()
+    )
+    order_ids = _coalesced_text(ordered, ("client_order_id", "order_id"))
+    filled = _coalesced_numeric(ordered, FILLED_QUANTITY_COLUMNS)
+    execution_price = _coalesced_numeric(ordered, EXECUTION_PRICE_COLUMNS)
+    fees = _coalesced_numeric(ordered, FEE_COLUMNS).fillna(0.0)
+
+    if "position_reconciled" in ordered.columns:
+        reconciled = ordered["position_reconciled"].map(
+            lambda value: isinstance(value, (bool, np.bool_)) and bool(value)
+        )
+    else:
+        reconciled = pd.Series(False, index=ordered.index, dtype=bool)
+
+    candidate_fill = (
+        statuses.isin(REALIZED_TERMINAL_STATUSES)
+        & sides.isin(("BUY", "SELL"))
+        & filled.gt(0)
+        & reconciled
+    )
+    eligible_input = candidate_fill & execution_price.gt(0)
+
+    output = pd.DataFrame(index=ordered.index)
+    output["candidate_fill"] = candidate_fill
+    output["missing_execution_price"] = candidate_fill & ~execution_price.gt(0)
+    output["eligible"] = False
+    output["execution_price"] = np.nan
+    output["filled_quantity"] = np.nan
+    output["delta_actual"] = np.nan
+    output["actual_cumulative"] = np.nan
+    output["ln_reference"] = np.nan
+    output["excess"] = np.nan
+
+    actual = 0.0
+    has_execution = False
+    counted: dict[str, tuple[float, float, float]] = {}
+    last_reference = math.nan
+
+    for position in ordered.index:
+        if eligible_input.iloc[position]:
+            key_value = order_ids.iloc[position]
+            key = str(key_value) if pd.notna(key_value) else f"row:{position}"
+            cumulative_qty = float(filled.iloc[position])
+            price = float(execution_price.iloc[position])
+            cumulative_notional = cumulative_qty * price
+            cumulative_fee = max(0.0, float(fees.iloc[position]))
+            previous_qty, previous_notional, previous_fee = counted.get(
+                key, (0.0, 0.0, 0.0)
+            )
+
+            # Ignore duplicate/stale cumulative snapshots.  A higher filled
+            # quantity contributes only the newly observed cumulative notional.
+            if cumulative_qty > previous_qty + 1e-12:
+                incremental_notional = cumulative_notional - previous_notional
+                incremental_fee = max(0.0, cumulative_fee - previous_fee)
+                if incremental_notional > 0:
+                    sign = 1.0 if sides.iloc[position] == "SELL" else -1.0
+                    delta = sign * incremental_notional - incremental_fee
+                    actual += delta
+                    has_execution = True
+                    counted[key] = (
+                        cumulative_qty,
+                        cumulative_notional,
+                        cumulative_fee,
+                    )
+                    last_reference = fix_c * math.log(price / p0)
+                    output.loc[position, "eligible"] = True
+                    output.loc[position, "execution_price"] = price
+                    output.loc[position, "filled_quantity"] = cumulative_qty - previous_qty
+                    output.loc[position, "delta_actual"] = delta
+
+        if has_execution:
+            if pd.isna(output.loc[position, "delta_actual"]):
+                output.loc[position, "delta_actual"] = 0.0
+            output.loc[position, "actual_cumulative"] = actual
+            output.loc[position, "ln_reference"] = last_reference
+            output.loc[position, "excess"] = actual - last_reference
+
+    return output
 
 
 def trade_price_column_candidates(columns) -> list[str]:
@@ -68,15 +249,14 @@ def trade_price_series(trades: pd.DataFrame, price_column: str) -> list[float]:
 # fields to Thai labels and lays them out under three grouped headers:
 #
 #   ① Logged DNA          — what the bot actually recorded per tick
-#   ② เส้นอ้างอิงทางทฤษฎี   — Rₙ = Fix_c × ln(Pₙ / P₀)
-#   ③ เส้น Rebalancing จริง — Aₙ (สะสม), ΔAₙ (ต่อสเต็ป), Eₙ = Aₙ − Rₙ
+#   ② Execution reference   — Rₙ = Fix_c × ln(P_exec / P₀)
+#   ③ Realized cash         — Aₙ (สะสม), ΔAₙ (ต่อ fill), Eₙ = Aₙ − Rₙ
 #
-# Groups ② and ③ are recomputed from the logged price series with the same
-# Fix_c / P₀ the guide charts use, so the table and the charts always agree.
+# Groups ② and ③ never use a market quote as an execution-price substitute.
 
 GROUP_LOGGED = "① Logged DNA (บันทึกจากบอท)"
-GROUP_REFERENCE = "② เส้นอ้างอิงทางทฤษฎี · Rₙ = Fix_c·ln(Pₙ/P₀)"
-GROUP_REBALANCED = "③ เส้น Rebalancing จริง · Aₙ, Eₙ"
+GROUP_REFERENCE = "② Execution reference · Rₙ = Fix_c·ln(P_exec/P₀)"
+GROUP_REBALANCED = "③ Realized execution cash · Aₙ, Eₙ"
 
 # (source column, readable label). The price column is resolved at runtime
 # because it may be last_price, market_state_last_price, or a suffix match.
@@ -96,6 +276,12 @@ _LOGGED_LABELS: tuple[tuple[str, str], ...] = (
 )
 _PRICE_LABEL = "ราคา Pₙ (USD)"
 _REBALANCE_LABEL = "ส่วนต่างเป้าหมาย (USD)"
+REFERENCE_LABEL = "Rₙ อ้างอิงจาก execution (USD)"
+EXECUTION_PRICE_LABEL = "ราคา execute จริง (USD)"
+FILLED_QUANTITY_LABEL = "จำนวน fill ที่นับ (หุ้น)"
+DELTA_ACTUAL_LABEL = "ΔAₙ ต่อ fill (USD; หัก fee เมื่อมี)"
+ACTUAL_CUMULATIVE_LABEL = "Aₙ สะสมจาก fill (USD; หัก fee เมื่อมี)"
+EXCESS_LABEL = "Eₙ = Aₙ − Rₙ (USD)"
 # Logged USD amounts carry float noise (e.g. 11.311520399999836); round the
 # money-valued logged columns so the table reads cleanly.
 _ROUNDED_LOGGED_LABELS = frozenset({"มูลค่าพอร์ต (USD)", _REBALANCE_LABEL})
@@ -141,33 +327,16 @@ def build_trade_log_display(
 ) -> pd.DataFrame:
     """Return a newest-first table with three grouped, renamed column blocks.
 
-    Cumulative figures (group ③) must be summed oldest-first, so the frame is
-    ordered chronologically for the maths and reversed for display. Rows
-    without a usable price (e.g. ERROR ticks) keep their logged fields and
-    show blank reference / rebalancing values.
+    Cumulative figures (group ③) are summed oldest-first from eligible broker
+    fills and the frame is reversed for display.  Non-execution rows keep their
+    logged fields and cannot move realized cumulative cash.
     """
     ordered = trades
     if "created_at" in trades.columns:
         ordered = trades.sort_values("created_at")
     ordered = ordered.reset_index(drop=True)
 
-    prices = pd.to_numeric(ordered.get(price_column), errors="coerce")
-    valid = prices.notna() & (prices > 0)
-
-    reference = pd.Series(np.nan, index=ordered.index)
-    delta_actual = pd.Series(np.nan, index=ordered.index)
-    actual = pd.Series(np.nan, index=ordered.index)
-    excess = pd.Series(np.nan, index=ordered.index)
-
-    valid_prices = [float(price) for price in prices[valid]]
-    if valid_prices:
-        # rows[0] is the synthetic P₀ anchor; rows[1:] align to the priced ticks.
-        cashflow = rebalancing_cashflow_from_prices(valid_prices, fix_c, p0)[1:]
-        for position, row in zip(ordered.index[valid], cashflow):
-            reference[position] = round(row["ln_reference"], 2)
-            delta_actual[position] = round(row["delta_actual"], 2)
-            actual[position] = round(row["actual_cumulative"], 2)
-            excess[position] = round(row["excess"], 2)
+    realized = realized_cashflow_from_trades(ordered, fix_c, p0)
 
     columns: dict[tuple[str, str], Any] = {}
 
@@ -188,10 +357,22 @@ def build_trade_log_display(
         if source == "dna_signal":  # slot the price right after the DNA fields
             add_logged(price_column, _PRICE_LABEL)
 
-    columns[(GROUP_REFERENCE, "Rₙ อ้างอิง (USD)")] = reference.to_numpy()
-    columns[(GROUP_REBALANCED, "ΔAₙ ต่อสเต็ป (USD)")] = delta_actual.to_numpy()
-    columns[(GROUP_REBALANCED, "Aₙ สะสม (USD)")] = actual.to_numpy()
-    columns[(GROUP_REBALANCED, "Eₙ ส่วนเกินสะสม (USD)")] = excess.to_numpy()
+    columns[(GROUP_REFERENCE, EXECUTION_PRICE_LABEL)] = (
+        realized["execution_price"].round(5).to_numpy()
+    )
+    columns[(GROUP_REFERENCE, REFERENCE_LABEL)] = (
+        realized["ln_reference"].round(2).to_numpy()
+    )
+    columns[(GROUP_REBALANCED, FILLED_QUANTITY_LABEL)] = (
+        realized["filled_quantity"].round(8).to_numpy()
+    )
+    columns[(GROUP_REBALANCED, DELTA_ACTUAL_LABEL)] = (
+        realized["delta_actual"].round(2).to_numpy()
+    )
+    columns[(GROUP_REBALANCED, ACTUAL_CUMULATIVE_LABEL)] = (
+        realized["actual_cumulative"].round(2).to_numpy()
+    )
+    columns[(GROUP_REBALANCED, EXCESS_LABEL)] = realized["excess"].round(2).to_numpy()
 
     display = pd.DataFrame(columns)
     display.columns = pd.MultiIndex.from_tuples(display.columns)

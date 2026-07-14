@@ -4,12 +4,17 @@ import pandas as pd
 
 from manual_tools import rebalancing_cashflow_from_prices
 from trade_log import (
+    ACTUAL_CUMULATIVE_LABEL,
+    DELTA_ACTUAL_LABEL,
+    EXCESS_LABEL,
     GROUP_LOGGED,
     GROUP_REBALANCED,
     GROUP_REFERENCE,
+    REFERENCE_LABEL,
     TRADE_PRICE_COLUMNS,
     build_trade_log_display,
     find_trade_price_column,
+    realized_cashflow_from_trades,
     trade_price_series,
 )
 
@@ -100,14 +105,19 @@ def test_known_columns_cover_the_bot_log_schema():
 # ---------------------------------------------------------------------------
 
 def sample_log() -> pd.DataFrame:
-    """Two priced ticks, oldest-first prices 100 then 110, flattened."""
+    """A PASS followed by one broker-confirmed BUY fill."""
     return normalize([
         {
             "created_at": "2026-07-10T19:00:00Z",
             "symbol": "AAPL",
             "strategy_id": "SHANNON_DEMON_DNA",
             "state_document": "SHANNON_DEMON_DNA_SMR",
-            "status": "ORDER_SUBMITTED",
+            "status": "ORDER_FILLED",
+            "client_order_id": "order-1",
+            "side": "BUY",
+            "filled_quantity": 0.5,
+            "position_reconciled": True,
+            "order_status": {"average_filled_price": 110.0},
             "dna_step": 1,
             "dna_signal": 1,
             "baseline_pnl": 9.9,
@@ -165,24 +175,20 @@ def test_display_is_newest_first_and_matches_cashflow():
     prices_col = display[(GROUP_LOGGED, "ราคา Pₙ (USD)")].tolist()
     assert prices_col == [110.0, 100.0]  # newest first
 
-    # groups ② / ③ recompute from the oldest-first series [100, 110]
-    cashflow = rebalancing_cashflow_from_prices([100.0, 110.0], 1500.0, 100.0)[1:]
-    ref = display[(GROUP_REFERENCE, "Rₙ อ้างอิง (USD)")].tolist()
-    actual = display[(GROUP_REBALANCED, "Aₙ สะสม (USD)")].tolist()
-    excess = display[(GROUP_REBALANCED, "Eₙ ส่วนเกินสะสม (USD)")].tolist()
-    # display is newest-first, cashflow is oldest-first -> reverse to compare
-    assert ref == [round(cashflow[1]["ln_reference"], 2), round(cashflow[0]["ln_reference"], 2)]
-    assert actual == [round(cashflow[1]["actual_cumulative"], 2), round(cashflow[0]["actual_cumulative"], 2)]
-    assert excess == [round(cashflow[1]["excess"], 2), round(cashflow[0]["excess"], 2)]
+    # The PASS row is not execution.  The BUY fill spends 0.5*110 = 55 USD.
+    assert display[(GROUP_REBALANCED, DELTA_ACTUAL_LABEL)].iloc[0] == -55.0
+    assert display[(GROUP_REBALANCED, ACTUAL_CUMULATIVE_LABEL)].iloc[0] == -55.0
+    assert pd.isna(display[(GROUP_REBALANCED, ACTUAL_CUMULATIVE_LABEL)].iloc[1])
 
 
 def test_excess_equals_actual_minus_reference():
     display = build_trade_log_display(sample_log(), "market_state_last_price", 1500.0, 100.0)
 
-    ref = display[(GROUP_REFERENCE, "Rₙ อ้างอิง (USD)")]
-    actual = display[(GROUP_REBALANCED, "Aₙ สะสม (USD)")]
-    excess = display[(GROUP_REBALANCED, "Eₙ ส่วนเกินสะสม (USD)")]
-    assert (actual - ref).round(2).tolist() == excess.round(2).tolist()
+    ref = display[(GROUP_REFERENCE, REFERENCE_LABEL)]
+    actual = display[(GROUP_REBALANCED, ACTUAL_CUMULATIVE_LABEL)]
+    excess = display[(GROUP_REBALANCED, EXCESS_LABEL)]
+    valid = actual.notna() & ref.notna() & excess.notna()
+    assert ((actual[valid] - ref[valid]).round(2) == excess[valid].round(2)).all()
 
 
 def test_logged_money_columns_are_rounded():
@@ -204,9 +210,9 @@ def test_rows_without_price_keep_logged_fields_and_blank_equations():
 
     status = display[(GROUP_LOGGED, "สถานะ")].tolist()
     assert status == ["ERROR", "PASS_THRESHOLD"]  # both rows kept, newest first
-    ref = display[(GROUP_REFERENCE, "Rₙ อ้างอิง (USD)")]
+    ref = display[(GROUP_REFERENCE, REFERENCE_LABEL)]
     assert pd.isna(ref.iloc[0])  # ERROR row has no price -> blank reference
-    assert pd.notna(ref.iloc[1])  # priced row is filled
+    assert pd.isna(ref.iloc[1])  # PASS has a quote, but no broker execution
 
 
 def test_price_column_is_resolved_dynamically():
@@ -265,14 +271,14 @@ def test_pass_rows_take_sign_from_value_versus_fix_c():
 # Anchor P₀ = first price in the window → Aₙ/Rₙ/Eₙ start at 0
 # ---------------------------------------------------------------------------
 
-def test_anchoring_at_first_price_zeroes_the_oldest_row():
+def test_rows_before_first_confirmed_fill_have_blank_realized_values():
     display = build_trade_log_display(sample_log(), "market_state_last_price", 1500.0, 100.0)
 
     oldest = display.iloc[-1]  # display is newest first
-    assert oldest[(GROUP_REFERENCE, "Rₙ อ้างอิง (USD)")] == 0.0
-    assert oldest[(GROUP_REBALANCED, "ΔAₙ ต่อสเต็ป (USD)")] == 0.0
-    assert oldest[(GROUP_REBALANCED, "Aₙ สะสม (USD)")] == 0.0
-    assert oldest[(GROUP_REBALANCED, "Eₙ ส่วนเกินสะสม (USD)")] == 0.0
+    assert pd.isna(oldest[(GROUP_REFERENCE, REFERENCE_LABEL)])
+    assert pd.isna(oldest[(GROUP_REBALANCED, DELTA_ACTUAL_LABEL)])
+    assert pd.isna(oldest[(GROUP_REBALANCED, ACTUAL_CUMULATIVE_LABEL)])
+    assert pd.isna(oldest[(GROUP_REBALANCED, EXCESS_LABEL)])
 
 
 def test_real_log_window_shows_near_zero_harvest_not_synthetic_step():
@@ -288,3 +294,122 @@ def test_real_log_window_shows_near_zero_harvest_not_synthetic_step():
     final = rows[-1]
     assert abs(final["actual_cumulative"]) < 15.0  # ≈ 9.9, not 3228
     assert 0.0 <= final["excess"] < 0.05  # harvest ≈ 0 on a one-way path
+
+
+# ---------------------------------------------------------------------------
+# Realized execution ledger: only terminal fills reconciled to Positions count
+# ---------------------------------------------------------------------------
+
+def execution_row(
+    created_at: int,
+    *,
+    status: str,
+    side: str = "BUY",
+    filled_quantity: float = 0.0,
+    execution_price: float | None = None,
+    position_reconciled: bool = False,
+    client_order_id: str | None = None,
+    fee: float | None = None,
+) -> dict:
+    row = {
+        "created_at": created_at,
+        "status": status,
+        "side": side,
+        "filled_quantity": filled_quantity,
+        "position_reconciled": position_reconciled,
+        "client_order_id": client_order_id or f"order-{created_at}",
+        "last_price": 999.0,
+    }
+    if execution_price is not None:
+        row["order_status"] = {"average_filled_price": execution_price}
+    if fee is not None:
+        row["transaction_fee"] = fee
+    return row
+
+
+def test_realized_ledger_uses_fill_price_quantity_side_and_fee():
+    trades = normalize([
+        execution_row(1, status="ORDER_FILLED", side="BUY", filled_quantity=2,
+                      execution_price=10, position_reconciled=True, fee=0.25),
+        execution_row(2, status="ORDER_FILLED", side="SELL", filled_quantity=1,
+                      execution_price=12, position_reconciled=True, fee=0.10),
+    ])
+
+    ledger = realized_cashflow_from_trades(trades, fix_c=100, p0=10)
+
+    assert ledger["delta_actual"].tolist() == [-20.25, 11.90]
+    assert ledger["actual_cumulative"].tolist() == [-20.25, -8.35]
+    assert ledger["execution_price"].tolist() == [10.0, 12.0]
+    assert ledger["eligible"].tolist() == [True, True]
+
+
+def test_pass_pending_rejected_unfilled_and_position_pending_do_not_move_cash():
+    trades = normalize([
+        execution_row(1, status="ORDER_FILLED", side="SELL", filled_quantity=1,
+                      execution_price=10, position_reconciled=True),
+        execution_row(2, status="PASS_THRESHOLD", execution_price=50),
+        execution_row(3, status="ORDER_SUBMITTED", filled_quantity=0, execution_price=51),
+        execution_row(4, status="ORDER_REJECTED", filled_quantity=0, execution_price=52),
+        execution_row(5, status="ORDER_NOT_FILLED", filled_quantity=0, execution_price=53),
+        execution_row(6, status="ORDER_FILLED_POSITION_PENDING", filled_quantity=2,
+                      execution_price=54, position_reconciled=False),
+    ])
+
+    ledger = realized_cashflow_from_trades(trades, fix_c=100, p0=10)
+
+    assert ledger["delta_actual"].tolist() == [10.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert ledger["actual_cumulative"].tolist() == [10.0] * 6
+    assert ledger["eligible"].tolist() == [True, False, False, False, False, False]
+
+
+def test_fill_without_execution_price_is_not_fabricated_from_last_quote():
+    trades = normalize([
+        execution_row(1, status="ORDER_FILLED", side="SELL", filled_quantity=1,
+                      execution_price=None, position_reconciled=True),
+    ])
+
+    ledger = realized_cashflow_from_trades(trades, fix_c=100, p0=10)
+
+    assert not ledger.loc[0, "eligible"]
+    assert pd.isna(ledger.loc[0, "delta_actual"])
+    assert pd.isna(ledger.loc[0, "actual_cumulative"])
+
+
+def test_terminal_partial_fill_counts_only_reconciled_increment_once():
+    trades = normalize([
+        execution_row(1, status="ORDER_PARTIAL_FILLED_TERMINAL", side="SELL",
+                      filled_quantity=0.5, execution_price=10,
+                      position_reconciled=True, client_order_id="same"),
+        execution_row(2, status="ORDER_PARTIAL_FILLED_TERMINAL", side="SELL",
+                      filled_quantity=0.5, execution_price=10,
+                      position_reconciled=True, client_order_id="same"),
+        execution_row(3, status="ORDER_FILLED", side="SELL",
+                      filled_quantity=1.0, execution_price=11,
+                      position_reconciled=True, client_order_id="same"),
+    ])
+
+    ledger = realized_cashflow_from_trades(trades, fix_c=100, p0=10)
+
+    # 0.5*10 first; duplicate adds zero; final cumulative notional 1*11 adds 6.
+    assert ledger["delta_actual"].tolist() == [5.0, 0.0, 6.0]
+    assert ledger["actual_cumulative"].tolist() == [5.0, 5.0, 11.0]
+
+
+def test_display_cashflow_columns_follow_realized_ledger_not_quote_ticks():
+    trades = normalize([
+        execution_row(1, status="ORDER_FILLED", side="BUY", filled_quantity=2,
+                      execution_price=10, position_reconciled=True),
+        execution_row(2, status="PASS_THRESHOLD", execution_price=99),
+        execution_row(3, status="ORDER_FILLED", side="SELL", filled_quantity=1,
+                      execution_price=12, position_reconciled=True),
+    ])
+
+    display = build_trade_log_display(trades, "last_price", 100, 10)
+
+    # Display is newest-first. PASS carries the prior cumulative value and has ΔA=0.
+    assert display[(GROUP_REBALANCED, DELTA_ACTUAL_LABEL)].tolist() == [12.0, 0.0, -20.0]
+    assert display[(GROUP_REBALANCED, ACTUAL_CUMULATIVE_LABEL)].tolist() == [-8.0, -20.0, -20.0]
+    ref = display[(GROUP_REFERENCE, REFERENCE_LABEL)]
+    actual = display[(GROUP_REBALANCED, ACTUAL_CUMULATIVE_LABEL)]
+    excess = display[(GROUP_REBALANCED, EXCESS_LABEL)]
+    assert (actual - ref).round(2).tolist() == excess.round(2).tolist()

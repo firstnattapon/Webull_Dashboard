@@ -16,6 +16,7 @@ from trade_log import (
     TRADE_PRICE_COLUMNS,
     build_trade_log_display,
     find_trade_price_column,
+    realized_cashflow_from_trades,
     trade_price_series,
 )
 
@@ -131,6 +132,13 @@ with principle_cols[2]:
         "เมื่อรอบซื้อ-ขายปิด (ราคาย้อนกลับมาระดับเดิม)"
     )
 
+st.info(
+    "สามสูตรด้านบนเป็น Learning Guide ภายใต้ ideal full-rebalance ทุก price step. "
+    "ส่วน dataframe เงินจริงด้านล่างใช้ signed filled notional จาก broker; "
+    "เมื่อมี threshold, partial fill, slippage หรือ fee ค่า Eₙ จาก execution "
+    "อาจติดลบได้และไม่ควรถูกเรียกว่า harvest ที่รับประกันว่า Eₙ ≥ 0"
+)
+
 if not project_id:
     st.info("ตั้งค่า firebase_service_account และ Project ID เพื่ออ่าน Firestore")
     render_reference_chart(float(guide_fix_c), float(guide_p0), 0.0)
@@ -166,17 +174,44 @@ try:
         # start at 0 (ทุนถูกแยกออก) and measure only what happened in view.
         # An external P₀ far from the traded range would inject one huge
         # synthetic first step that dwarfs the real harvest.
-        anchor_p0 = prices[0] if prices else float(guide_p0)
+        theoretical_anchor_p0 = prices[0] if prices else float(guide_p0)
+
+        # Realized cash is a different data product from the Learning Guide's
+        # every-quote what-if path.  Probe eligibility first, then anchor Rₙ at
+        # the first broker execution in view.  A market quote is never used as
+        # a substitute when the execution price is missing.
+        realized_probe = realized_cashflow_from_trades(
+            trades, float(guide_fix_c), float(guide_p0)
+        )
+        confirmed_execution_prices = realized_probe.loc[
+            realized_probe["eligible"], "execution_price"
+        ].dropna()
+        execution_anchor_p0 = (
+            float(confirmed_execution_prices.iloc[0])
+            if not confirmed_execution_prices.empty
+            else float(guide_p0)
+        )
+        realized_rows = realized_cashflow_from_trades(
+            trades, float(guide_fix_c), execution_anchor_p0
+        )
+        confirmed_fills = int(realized_rows["eligible"].sum())
+        fills_missing_execution_price = int(
+            realized_rows["missing_execution_price"].sum()
+        )
 
         if price_column:
             st.caption(
                 "จัดกลุ่มคอลัมน์เพื่ออ่านง่าย — "
                 "① Logged DNA (บันทึกจากบอท) · "
-                "② เส้นอ้างอิงทางทฤษฎี Rₙ · "
-                "③ เส้น Rebalancing จริง Aₙ, Eₙ "
+                "② Execution reference Rₙ · "
+                "③ เงินสดจาก execution ที่ยืนยันแล้ว Aₙ, Eₙ "
                 f"(คอลัมน์ราคา: `{price_column}` · "
-                f"anchor P₀ = ราคาแรกในหน้าต่าง {anchor_p0:,.2f} "
-                "→ แถวเก่าสุด Aₙ = Rₙ = Eₙ = 0)"
+                f"execution anchor P₀ = {execution_anchor_p0:,.5f})"
+            )
+            st.caption(
+                "คอลัมน์ realized รับเฉพาะ terminal fill ที่ filled_quantity > 0, "
+                "position_reconciled = true และมี execution price จริง; "
+                "PASS/pending/rejected/unfilled ไม่เปลี่ยนยอดสะสม และไม่ใช้ last_price แทน fill price"
             )
             st.caption(
                 "เครื่องหมาย ส่วนต่างเป้าหมาย: − ต้องขายออก · + ต้องซื้อเข้า "
@@ -184,14 +219,46 @@ try:
             )
             st.dataframe(
                 build_trade_log_display(
-                    trades, price_column, float(guide_fix_c), anchor_p0
+                    trades, price_column, float(guide_fix_c), execution_anchor_p0
                 ),
                 use_container_width=True,
             )
         else:
             st.dataframe(trades, use_container_width=True)
 
-        st.subheader("กราฟตาม Learning Guide 101 จาก trade log")
+        st.subheader("ยอดเงินจริงจาก execution ที่ยืนยันแล้ว")
+        realized_valid = realized_rows.dropna(subset=["actual_cumulative"])
+        if realized_valid.empty:
+            st.info(
+                "ยังไม่มี fill ที่ผ่านครบทั้งสถานะ terminal, filled_quantity, "
+                "Positions reconciliation และ execution price — คอลัมน์ realized จึงเว้นว่างอย่างตั้งใจ"
+            )
+        else:
+            realized_final = realized_valid.iloc[-1]
+            realized_cols = st.columns(4)
+            realized_cols[0].metric(
+                "Confirmed fills", confirmed_fills
+            )
+            realized_cols[1].metric(
+                "Aₙ เงินสดสะสม (fee-aware)",
+                f"{realized_final['actual_cumulative']:+,.2f}",
+            )
+            realized_cols[2].metric(
+                "Rₙ execution reference",
+                f"{realized_final['ln_reference']:+,.2f}",
+            )
+            realized_cols[3].metric(
+                "Eₙ = Aₙ − Rₙ",
+                f"{realized_final['excess']:+,.2f}",
+            )
+        if fills_missing_execution_price:
+            st.warning(
+                f"พบ {fills_missing_execution_price} fill ที่ reconcile กับ Positions แล้ว "
+                "แต่ log ไม่มี execution/average fill price จึงไม่คำนวณเงินจริงจาก last_price แทน "
+                "ต้องเพิ่ม execution price ใน bot trade document ก่อน"
+            )
+
+        st.subheader("กราฟ Learning Guide 101 แบบ what-if จาก market quote")
         if not prices:
             st.info(
                 "ไม่พบคอลัมน์ราคาที่ใช้งานได้ใน trade log "
@@ -202,33 +269,25 @@ try:
             render_reference_chart(float(guide_fix_c), float(guide_p0), 0.0)
         else:
             rows = rebalancing_cashflow_from_prices(
-                prices, float(guide_fix_c), anchor_p0
+                prices, float(guide_fix_c), theoretical_anchor_p0
             )
             final_row = rows[-1]
-            actions = trades.get("decision_action")
-            real_trades = (
-                int(actions.isin(["BUY", "SELL"]).sum())
-                if actions is not None
-                else 0
-            )
             cols = st.columns(5)
             cols[0].metric(
-                "กำไร harvest Eₙ", f"{final_row['excess']:+,.2f}"
+                "What-if harvest Eₙ", f"{final_row['excess']:+,.2f}"
             )
             cols[1].metric("ราคาสุดท้าย Pₙ", f"{final_row['price']:,.2f}")
             cols[2].metric(
-                "เงินสดสะสม Aₙ", f"{final_row['actual_cumulative']:+,.2f}"
+                "What-if Aₙ", f"{final_row['actual_cumulative']:+,.2f}"
             )
             cols[3].metric("อ้างอิง Rₙ", f"{final_row['ln_reference']:+,.2f}")
-            cols[4].metric("เทรดจริง (BUY/SELL)", real_trades)
-            if real_trades == 0:
-                st.warning(
-                    "ทุกแถวในหน้าต่างนี้เป็น PASS — ไม่มีการส่ง order จริง "
-                    "Aₙ/Rₙ/Eₙ ที่แสดงจึงเป็นเส้นเชิงทฤษฎีจาก price path "
-                    "(what-if rebalance ทุก tick) ไม่ใช่เงินสดที่ทำได้จริง"
-                )
+            cols[4].metric("Confirmed fills", confirmed_fills)
+            st.warning(
+                "กราฟชุดนี้เป็น Learning Guide แบบ what-if rebalance ทุก market quote "
+                "ไม่ใช่เงินสดจาก broker; เงินจริงให้ดู dataframe และ metrics ส่วน execution ด้านบน"
+            )
             st.caption(
-                f"anchor P₀ = ราคาแรกในหน้าต่าง ({anchor_p0:,.2f}) → "
+                f"what-if anchor P₀ = ราคาแรกในหน้าต่าง ({theoretical_anchor_p0:,.2f}) → "
                 "Eₙ เริ่มจาก 0 แยกทุนออก อ่านเป็นกำไรสะสมได้ตรง ๆ; "
                 "เส้น Rₙ เต็มประวัติตั้งแต่ P₀ จริงของบอทดูได้จากคอลัมน์ "
                 "`baseline_pnl` ที่บอทบันทึกไว้ทุกแถว"
@@ -243,7 +302,7 @@ try:
                 use_container_width=True,
             )
             render_reference_chart(
-                float(guide_fix_c), anchor_p0, float(final_row["excess"])
+                float(guide_fix_c), theoretical_anchor_p0, float(final_row["excess"])
             )
 except Exception as exc:
     st.error(f"Firestore error: {exc}")
