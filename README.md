@@ -18,6 +18,21 @@ python -m venv .venv
 หน้า Manual ใช้งานได้โดยไม่ต้องตั้งค่า Firestore ส่วนหน้า Dashboard ต้องมี
 `.streamlit/secrets.toml` ที่ประกอบด้วย `firebase_service_account`
 
+## Realized cash-flow contract
+
+ตาราง trade log แยกข้อมูลสองชนิดออกจากกัน:
+
+- กราฟ Learning Guide เป็น **what-if price path** จาก market quote
+- คอลัมน์ `ΔAₙ`, `Aₙ` และ `Eₙ` เป็น **realized execution ledger** และรับข้อมูล
+  เฉพาะ terminal fill ที่มี `filled_quantity > 0`, `position_reconciled = true`,
+  side เป็น BUY/SELL และมี execution/average fill price จริง
+
+`PASS`, pending, rejected, unfilled และ `ORDER_*_POSITION_PENDING` ไม่ทำให้ยอด
+realized เปลี่ยน และ dashboard จะไม่ใช้ `last_price` แทน execution price หาก
+trade document ยังไม่มีราคาที่ execute คอลัมน์ realized จะเว้นว่างพร้อมคำเตือน
+เพื่อไม่สร้างตัวเลขเงินจริงที่พิสูจน์ไม่ได้ ค่า `Aₙ` จะหัก fee เมื่อ log มี field
+ค่าธรรมเนียมที่รองรับ มิฉะนั้นจะแสดง gross cash พร้อม contract นี้อย่างชัดเจน
+
 ## Security
 
 - ค่าเริ่มต้นของ Manual คือ **Test (UAT)**
