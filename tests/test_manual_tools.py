@@ -111,6 +111,25 @@ def test_cashflow_table_follows_guide_formulas():
         previous = price
 
 
+def test_cheat_sheet_default_examples_match_the_shared_math_oracle():
+    decision = calculate_shannon_decision(
+        quantity=10.0,
+        last_price=100.0,
+        fix_c=1500.0,
+        p0=100.0,
+        diff=30.0,
+    )
+    closed_loop = rebalancing_cashflow_from_prices(
+        [110.0, 100.0], fix_c=1500.0, p0=100.0
+    )[-1]
+
+    assert decision.action == "BUY"
+    assert decision.order_quantity == pytest.approx(5.0)
+    assert closed_loop["actual_cumulative"] == pytest.approx(13.6363636364)
+    assert closed_loop["ln_reference"] == pytest.approx(0.0)
+    assert closed_loop["excess"] == pytest.approx(13.6363636364)
+
+
 def test_cashflow_table_rejects_non_positive_prices():
     with pytest.raises(ValueError, match="price"):
         rebalancing_cashflow_from_prices([100.0, 0.0], 1500.0, 100.0)

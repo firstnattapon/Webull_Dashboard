@@ -142,6 +142,7 @@ with st.sidebar:
     fix_c_tab,
     rebalancing_tab,
     web_apps_tab,
+    cheat_sheet_tab,
     benchmark_tab,
 ) = st.tabs(
     [
@@ -152,6 +153,7 @@ with st.sidebar:
         "Logical FIX_C",
         "Rebalancing 101",
         "🌐 Web Apps",
+        "⚡ Cheat Sheet",
         "Benchmark",
     ]
 )
@@ -674,6 +676,15 @@ with web_apps_tab:
         render_web_app("rebalancing101.html")
     else:
         render_web_app("rebalancing_playground.html")
+
+
+with cheat_sheet_tab:
+    st.subheader("⚡ Cheat Sheet — รู้ทันสมการในหน้าเดียว")
+    st.caption(
+        "ทดลอง Logical FIX_C และ Aₙ/Rₙ/Eₙ แบบ educational what-if "
+        "ใน iframe ที่ไม่เรียก Webull API และไม่เข้าถึง credentials"
+    )
+    render_web_app("cheat_sheet.html", height=1200)
 
 
 with benchmark_tab:

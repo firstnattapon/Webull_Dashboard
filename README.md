@@ -6,7 +6,12 @@ Lab** สำหรับทดสอบ Webull, DNA, Logical FIX_C และ ben
 Manual Test Lab รองรับ connection/quote, account list, balance, positions,
 order preview/place, open orders, history, detail, cancel, DNA encode/decode,
 Logical FIX_C, local benchmark และแท็บ Web Apps ที่รวมคู่มือ Rebalancing 101
-กับ Rebalancing Playground แบบโต้ตอบไว้ในหน้าเดียว
+กับ Rebalancing Playground แบบโต้ตอบไว้ในหน้าเดียว รวมถึงแท็บ **Cheat Sheet**
+สำหรับทดลองสูตร BUY/SELL/PASS และ price-path Aₙ/Rₙ/Eₙ แบบรวดเร็ว
+
+Cheat Sheet เป็น educational/what-if calculator ที่ทำงานจากไฟล์ local และไม่เรียก
+Webull API ตัวเลข Aₙ/Rₙ/Eₙ ในหน้านี้จึงไม่ใช่ realized broker ledger; การสรุป
+เงินจริงต้องใช้ quantity, execution price และ position reconciliation จาก fill จริง
 
 ## Run locally
 
