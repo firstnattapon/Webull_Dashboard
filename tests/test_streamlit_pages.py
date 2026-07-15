@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
@@ -38,6 +39,19 @@ def test_manual_page_loads_with_uat_and_blank_credentials():
     app.radio[0].set_value("Rebalancing Playground").run(timeout=30)
     assert not app.exception
     assert app.radio[0].value == "Rebalancing Playground"
+
+
+def test_manual_source_cannot_regress_to_hard_coded_credential_defaults():
+    source = Path("pages/Manual.py").read_text(encoding="utf-8")
+
+    for label in ("Account ID", "App Key", "App Secret"):
+        widget = re.search(
+            rf'st\.text_input\(\s*"{re.escape(label)}",(?P<body>.*?)\n\s*\)',
+            source,
+            flags=re.DOTALL,
+        )
+        assert widget is not None
+        assert re.search(r'\bvalue\s*=\s*""', widget.group("body"))
 
 
 def test_cheat_sheet_is_a_self_contained_local_asset():

@@ -46,6 +46,14 @@ def load_trades(db: firestore.Client, collection: str, limit: int) -> pd.DataFra
     return pd.json_normalize(rows, sep="_") if rows else pd.DataFrame()
 
 
+def positive_number(value) -> bool:
+    """Accept legacy numeric strings without letting malformed state crash UI."""
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def render_reference_chart(fix_c: float, p0: float, excess: float) -> None:
     st.markdown("#### กราฟที่ 2 — เงินทุนเทียบกับระดับราคา")
     st.code(
@@ -148,12 +156,39 @@ try:
     db = get_client(project_id)
     state = load_state(db, state_collection, state_document)
     if state:
-        cols = st.columns(4)
+        latest_market_state = state.get("latest_market_state")
+        if not isinstance(latest_market_state, dict):
+            latest_market_state = {}
+        cols = st.columns(5)
         cols[0].metric("DNA step", state.get("dna_step", "-"))
         cols[1].metric("Last signal", state.get("last_signal", "-"))
         cols[2].metric("Last status", state.get("last_status", "-"))
+        cols[3].metric(
+            "จำนวนถือครองล่าสุด (หุ้น)",
+            latest_market_state.get("quantity", "-"),
+        )
         last_logged = state.get("last_logged_at")
-        cols[3].metric("Last logged at", str(last_logged) if last_logged else "-")
+        cols[4].metric("Last logged at", str(last_logged) if last_logged else "-")
+        if latest_market_state:
+            st.caption(
+                "Latest holding source: "
+                f"`{latest_market_state.get('source', 'unknown')}` · "
+                "observed at "
+                f"`{latest_market_state.get('observed_at', '-')}` · "
+                "ค่านี้ไม่มาจาก expected_position_after"
+            )
+        pending_order = state.get("pending_order")
+        if (
+            isinstance(pending_order, dict)
+            and positive_number(pending_order.get("filled_quantity", 0))
+            and pending_order.get("position_reconciled") is not True
+        ):
+            st.warning(
+                "มี fill ที่กำลังรอ Webull Positions ยืนยันจำนวนถือครอง "
+                f"(sync={pending_order.get('position_sync_status', 'PENDING')}, "
+                f"cycles={pending_order.get('position_reconcile_cycles', 0)}). "
+                "ระบบต้องไม่ส่ง order ใหม่จนกว่าจะ reconcile สำเร็จ"
+            )
     else:
         st.info(f"ยังไม่มี state document ที่ {state_collection}/{state_document}")
 
@@ -212,6 +247,11 @@ try:
                 "คอลัมน์ realized รับเฉพาะ terminal fill ที่ filled_quantity > 0, "
                 "position_reconciled = true และมี execution price จริง; "
                 "PASS/pending/rejected/unfilled ไม่เปลี่ยนยอดสะสม และไม่ใช้ last_price แทน fill price"
+            )
+            st.caption(
+                "จำนวนถือครองใช้เฉพาะ position_after / market_state / quantity "
+                "ที่มาจาก Webull Positions; คอลัมน์ “คาดหลัง fill” ใช้วินิจฉัยเท่านั้น "
+                "และไม่ถูกนำไปแทนจำนวนถือครองหรือเงินจริง"
             )
             st.caption(
                 "เครื่องหมาย ส่วนต่างเป้าหมาย: − ต้องขายออก · + ต้องซื้อเข้า "

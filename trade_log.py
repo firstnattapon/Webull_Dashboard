@@ -266,7 +266,6 @@ _LOGGED_LABELS: tuple[tuple[str, str], ...] = (
     ("status", "สถานะ"),
     ("dna_step", "DNA step"),
     ("dna_signal", "DNA signal"),
-    ("market_state_quantity", "จำนวนถือครอง (หุ้น)"),
     ("decision_action", "คำสั่ง"),
     ("decision_side", "ฝั่ง"),
     ("decision_reason", "เหตุผล"),
@@ -275,6 +274,11 @@ _LOGGED_LABELS: tuple[tuple[str, str], ...] = (
     ("decision_rebalance", "ส่วนต่างเป้าหมาย (USD)"),
 )
 _PRICE_LABEL = "ราคา Pₙ (USD)"
+HOLDINGS_LABEL = "จำนวนถือครอง (หุ้น)"
+POSITION_BEFORE_LABEL = "ก่อน order (หุ้น)"
+EXPECTED_POSITION_LABEL = "คาดหลัง fill (หุ้น)"
+POSITION_SYNC_LABEL = "สถานะ sync"
+POSITION_OBSERVED_AT_LABEL = "ยืนยันล่าสุด (UTC)"
 _REBALANCE_LABEL = "ส่วนต่างเป้าหมาย (USD)"
 REFERENCE_LABEL = "Rₙ อ้างอิงจาก execution (USD)"
 EXECUTION_PRICE_LABEL = "ราคา execute จริง (USD)"
@@ -319,6 +323,67 @@ def signed_rebalance_series(ordered: pd.DataFrame, fix_c: float) -> pd.Series:
     return (magnitude * sign).round(2)
 
 
+def _exact_numeric(frame: pd.DataFrame, names: tuple[str, ...]) -> pd.Series:
+    """Coalesce exact columns only; never suffix-match expected quantities."""
+    result = pd.Series(np.nan, index=frame.index, dtype=float)
+    for name in names:
+        if name not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[name], errors="coerce")
+        result = result.where(result.notna(), values)
+    return result
+
+
+def observed_holdings_series(frame: pd.DataFrame) -> pd.Series:
+    """Broker-observed holdings, excluding every expected/calculated value.
+
+    New lifecycle rows publish ``position_after`` from Webull Positions.  PASS
+    and legacy rows use the exact market-state/top-level quantity snapshots.
+    The explicit column list prevents ``expected_position_after`` or an order
+    quantity from being selected by a loose suffix match.
+    """
+    return _exact_numeric(
+        frame,
+        ("position_after", "market_state_quantity", "quantity"),
+    )
+
+
+def position_sync_series(frame: pd.DataFrame) -> pd.Series:
+    explicit = (
+        frame["position_sync_status"].fillna("").astype(str).str.strip().str.upper()
+        if "position_sync_status" in frame.columns
+        else pd.Series("", index=frame.index, dtype=object)
+    )
+    statuses = (
+        frame["status"].fillna("").astype(str).str.strip().str.upper()
+        if "status" in frame.columns
+        else pd.Series("", index=frame.index, dtype=object)
+    )
+    reconciled = (
+        frame["position_reconciled"].map(
+            lambda value: isinstance(value, (bool, np.bool_)) and bool(value)
+        )
+        if "position_reconciled" in frame.columns
+        else pd.Series(False, index=frame.index, dtype=bool)
+    )
+    filled = _exact_numeric(
+        frame,
+        ("filled_quantity", "cumulative_filled_quantity", "filled_qty"),
+    ).fillna(0.0)
+    legacy = statuses.isin({
+        "ORDER_FILLED_POSITION_UNAVAILABLE",
+        "ORDER_FILLED_POSITION_UNCONFIRMED",
+        "ORDER_PARTIAL_POSITION_UNAVAILABLE",
+        "ORDER_PARTIAL_POSITION_UNCONFIRMED",
+    })
+
+    result = explicit.copy()
+    result = result.mask(result.eq("") & reconciled, "CONFIRMED")
+    result = result.mask(result.eq("") & legacy, "LEGACY_UNVERIFIED")
+    result = result.mask(result.eq("") & filled.gt(0), "PENDING")
+    return result
+
+
 def build_trade_log_display(
     trades: pd.DataFrame,
     price_column: str,
@@ -356,6 +421,33 @@ def build_trade_log_display(
         add_logged(source, label)
         if source == "dna_signal":  # slot the price right after the DNA fields
             add_logged(price_column, _PRICE_LABEL)
+            holdings = observed_holdings_series(ordered)
+            if holdings.notna().any():
+                columns[(GROUP_LOGGED, HOLDINGS_LABEL)] = holdings.round(8).to_numpy()
+
+            position_before = _exact_numeric(
+                ordered,
+                ("position_before", "pre_order_market_state_quantity"),
+            )
+            if position_before.notna().any():
+                columns[(GROUP_LOGGED, POSITION_BEFORE_LABEL)] = (
+                    position_before.round(8).to_numpy()
+                )
+
+            expected = _exact_numeric(ordered, ("expected_position_after",))
+            if expected.notna().any():
+                columns[(GROUP_LOGGED, EXPECTED_POSITION_LABEL)] = (
+                    expected.round(8).to_numpy()
+                )
+
+            sync = position_sync_series(ordered)
+            if sync.ne("").any():
+                columns[(GROUP_LOGGED, POSITION_SYNC_LABEL)] = sync.to_numpy()
+
+            if "position_observed_at" in ordered.columns:
+                columns[(GROUP_LOGGED, POSITION_OBSERVED_AT_LABEL)] = (
+                    ordered["position_observed_at"].to_numpy()
+                )
 
     columns[(GROUP_REFERENCE, EXECUTION_PRICE_LABEL)] = (
         realized["execution_price"].round(5).to_numpy()

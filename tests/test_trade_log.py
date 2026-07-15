@@ -10,10 +10,17 @@ from trade_log import (
     GROUP_LOGGED,
     GROUP_REBALANCED,
     GROUP_REFERENCE,
+    HOLDINGS_LABEL,
+    EXPECTED_POSITION_LABEL,
+    POSITION_BEFORE_LABEL,
+    POSITION_OBSERVED_AT_LABEL,
+    POSITION_SYNC_LABEL,
     REFERENCE_LABEL,
     TRADE_PRICE_COLUMNS,
     build_trade_log_display,
     find_trade_price_column,
+    observed_holdings_series,
+    position_sync_series,
     realized_cashflow_from_trades,
     trade_price_series,
 )
@@ -117,6 +124,11 @@ def sample_log() -> pd.DataFrame:
             "side": "BUY",
             "filled_quantity": 0.5,
             "position_reconciled": True,
+            "position_before": 9.5,
+            "expected_position_after": 10.0,
+            "position_after": 10.0,
+            "position_sync_status": "CONFIRMED",
+            "position_observed_at": "2026-07-10T19:00:10Z",
             "order_status": {"average_filled_price": 110.0},
             "dna_step": 1,
             "dna_signal": 1,
@@ -167,6 +179,50 @@ def test_display_drops_duplicate_and_constant_columns():
     # readable price / dna fields are present
     assert (GROUP_LOGGED, "ราคา Pₙ (USD)") in display.columns
     assert (GROUP_LOGGED, "DNA step") in display.columns
+
+
+def test_display_separates_confirmed_holdings_from_diagnostic_quantities():
+    display = build_trade_log_display(sample_log(), "market_state_last_price", 1500.0, 100.0)
+
+    assert display[(GROUP_LOGGED, HOLDINGS_LABEL)].iloc[0] == 10.0
+    assert display[(GROUP_LOGGED, POSITION_BEFORE_LABEL)].iloc[0] == 9.5
+    assert display[(GROUP_LOGGED, EXPECTED_POSITION_LABEL)].iloc[0] == 10.0
+    assert display[(GROUP_LOGGED, POSITION_SYNC_LABEL)].iloc[0] == "CONFIRMED"
+    assert display[(GROUP_LOGGED, POSITION_OBSERVED_AT_LABEL)].iloc[0] == "2026-07-10T19:00:10Z"
+
+
+def test_expected_position_is_never_selected_as_observed_holdings():
+    trades = normalize([
+        {
+            "created_at": "2026-07-10T19:00:00Z",
+            "status": "ORDER_FILLED_POSITION_PENDING",
+            "filled_quantity": 1.0,
+            "position_reconciled": False,
+            "position_sync_status": "MISMATCH",
+            "expected_position_after": 999.0,
+            "market_state": {"quantity": 5.0, "last_price": 100.0},
+        }
+    ])
+
+    holdings = observed_holdings_series(trades)
+    display = build_trade_log_display(trades, "market_state_last_price", 1500.0, 100.0)
+
+    assert holdings.tolist() == [5.0]
+    assert display[(GROUP_LOGGED, HOLDINGS_LABEL)].tolist() == [5.0]
+    assert display[(GROUP_LOGGED, EXPECTED_POSITION_LABEL)].tolist() == [999.0]
+    assert display[(GROUP_LOGGED, POSITION_SYNC_LABEL)].tolist() == ["MISMATCH"]
+
+
+def test_legacy_terminal_on_unavailable_rows_are_explicitly_unverified():
+    trades = normalize([
+        {
+            "status": "ORDER_FILLED_POSITION_UNAVAILABLE",
+            "filled_quantity": 1.0,
+            "position_reconciled": False,
+        }
+    ])
+
+    assert position_sync_series(trades).tolist() == ["LEGACY_UNVERIFIED"]
 
 
 def test_display_is_newest_first_and_matches_cashflow():
