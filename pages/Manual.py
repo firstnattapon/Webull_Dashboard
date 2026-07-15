@@ -108,20 +108,20 @@ with st.sidebar:
 
     st.text_input(
         "Account ID",
-        value="1251161573554425856",
+        value="",
         key="manual_account_id",
         autocomplete="off",
     )
     st.text_input(
         "App Key",
-        value="c12c25c93f98169ad56f5148e4edfd16",
+        value="",
         type="password",
         key="manual_app_key",
         autocomplete="off",
     )
     st.text_input(
         "App Secret",
-        value="f3ac0da97d2085ad4ce14b961cbd8824",
+        value="",
         type="password",
         key="manual_app_secret",
         autocomplete="off",
