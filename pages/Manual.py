@@ -17,8 +17,10 @@ from manual_tools import (
     WebullManualClient,
     build_market_order_payload,
     calculate_shannon_decision,
+    decode_dna,
     dna_summary,
     encode_dna,
+    gated_rebalancing_cashflow_from_prices,
     generate_client_order_id,
     rebalancing_reference_curve,
     run_benchmark,
@@ -655,6 +657,81 @@ with rebalancing_tab:
             "แบบจำลองเพื่อการเรียนรู้ · ยังไม่รวมค่าธรรมเนียม spread, slippage "
             "และภาษี"
         )
+
+        st.divider()
+        st.markdown("#### 🧬 Gated demo — DNA gate + บัญชีแบบแช่แข็ง (gated_theoretical_v2)")
+        st.caption(
+            "ตรงกับ ledger จริงของ lego-firebase: รอบ pass (gate=0) ไม่มีการ "
+            "rebalance — holdings แช่แข็งตั้งแต่รอบ act ล่าสุด ΔA จึงเป็น 0 และ "
+            "Aₙ ค้าง เมื่อกลับมา act ΔA เป็นก้อนเดียวเทียบราคาที่แช่ไว้ "
+            "(Fix_c × (Pₙ/P_acted − 1)) ส่วน Eₙ ใช้แบบ smooth: ค้างค่าของรอบ "
+            "act ล่าสุด — Eₙ จึงไม่ลดและ ≥ 0 เสมอ (x − 1 ≥ ln x ต่อ segment)"
+        )
+        gated_dna = st.text_input(
+            "DNA code (gate 0/1 ต่อรอบ — ใช้ decode เดียวกับ tab DNA)",
+            value="26021034252903219354832053493",
+            key="manual_gated_dna",
+        )
+        try:
+            gate_array = [int(x) for x in decode_dna(gated_dna.strip())]
+            n_rounds = len(sim_rows) - 1
+            if len(gate_array) < n_rounds:
+                reps = -(-n_rounds // len(gate_array))
+                gate_array = (gate_array * reps)
+            actions = gate_array[:n_rounds]
+            gated_rows = gated_rebalancing_cashflow_from_prices(
+                [r["price"] for r in sim_rows[1:]],
+                float(guide_fix_c), float(guide_p0), actions,
+            )
+            g_final = gated_rows[-1]
+            g_cols = st.columns(4)
+            g_cols[0].metric("รอบ act", f"{sum(actions)}/{n_rounds}")
+            g_cols[1].metric("Gated Aₙ", f"{g_final['actual_cumulative']:+,.2f}")
+            g_cols[2].metric(
+                "Gated Eₙ (smooth)", f"{g_final['excess']:+,.2f}"
+            )
+            g_cols[3].metric(
+                "Δ เทียบ pass-all Aₙ",
+                f"{g_final['actual_cumulative'] - final_row['actual_cumulative']:+,.2f}",
+            )
+            st.altair_chart(
+                cashflow_comparison_chart(
+                    [{k: r[k] for k in
+                      ("step", "actual_cumulative", "ln_reference", "excess")}
+                     for r in gated_rows],
+                    x_title="ลำดับรอบ (gated)",
+                ),
+                use_container_width=True,
+            )
+            gated_frame = pd.DataFrame(gated_rows)
+            st.dataframe(
+                gated_frame.rename(columns={
+                    "step": "รอบ",
+                    "action": "gate",
+                    "price": "ราคา Pᵢ",
+                    "acted_price": "P_acted (แช่แข็ง)",
+                    "delta_actual": "ΔA รอบนี้",
+                    "actual_cumulative": "Aₙ",
+                    "ln_reference": "Rₙ",
+                    "excess": "Eₙ (smooth)",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.download_button(
+                "ดาวน์โหลด CSV (gated)",
+                data=gated_frame.to_csv(index=False),
+                file_name="rebalancing_gated_demo.csv",
+                mime="text/csv",
+            )
+            st.info(
+                "ข้อสังเกต: gated ไม่ได้ดีกว่า pass-all เสมอ — ผลต่างมาจาก "
+                "cross-terms ของช่วงที่ข้าม (ตลาด trend การข้ามชนะ, ตลาด "
+                "mean-revert การ act ทุกรอบชนะ) DNA gate จึงต้องมาจากการ "
+                "คัดเลือกด้วย backtest/GA ไม่ใช่ข้ามมั่ว"
+            )
+        except Exception as gated_exc:
+            render_error(gated_exc)
     except Exception as exc:
         render_error(exc)
 

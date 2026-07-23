@@ -157,6 +157,70 @@ def rebalancing_cashflow_from_prices(
     return rows
 
 
+def gated_rebalancing_cashflow_from_prices(
+    prices: Iterable[float],
+    fix_c: float,
+    p0: float,
+    actions: Iterable[int],
+) -> list[dict[str, float]]:
+    """Gated demo ledger (gated_theoretical_v2) — เหมือน lego-firebase engine.
+
+    ``actions[i] ∈ {0,1}`` คือ gate ของรอบ ``i+1`` (รอบ 0 = จุด anchor เสมอ):
+      act (1):  ``ΔAᵢ = Fix_c × (Pᵢ/P_acted − 1)`` โดย ``P_acted`` = ราคารอบ act
+                ล่าสุด แล้วเลื่อน ``P_acted = Pᵢ`` ; ``Eᵢ = Aᵢ − Rᵢ``
+      pass (0): ``ΔAᵢ = 0``, ``Aᵢ`` ค้าง, ``P_acted`` แช่แข็ง และ
+                ``Eᵢ = Aᵢ − Fix_c × ln(P_acted/P₀)`` (smooth — ค้างค่า act ล่าสุด)
+
+    เหตุผลเศรษฐศาสตร์: ช่วง pass ไม่มีการ rebalance — holdings แช่แข็งตั้งแต่
+    act ล่าสุด กำไรจริงจึงเป็นก้อนเดียวเทียบราคาแช่แข็งตอน act ใหม่
+    คุณสมบัติ: ``Eₙ`` ไม่ลด และ ≥ 0 เสมอ (จาก ``x − 1 ≥ ln x`` ต่อ segment)
+    """
+    if not math.isfinite(float(fix_c)) or not math.isfinite(float(p0)):
+        raise ValueError("fix_c and p0 must be finite")
+    if fix_c <= 0 or p0 <= 0:
+        raise ValueError("fix_c and p0 must be greater than 0")
+
+    rows: list[dict[str, float]] = [{
+        "step": 0,
+        "action": 1,
+        "price": float(p0),
+        "acted_price": float(p0),
+        "delta_actual": 0.0,
+        "actual_cumulative": 0.0,
+        "ln_reference": 0.0,
+        "excess": 0.0,
+    }]
+    acted = float(p0)
+    actual = 0.0
+    for step, (raw_price, raw_action) in enumerate(zip(prices, actions), start=1):
+        price = float(raw_price)
+        action = int(raw_action)
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError("Every price must be finite and greater than 0")
+        if action not in (0, 1):
+            raise ValueError("Every action must be 0 or 1")
+        reference = fix_c * math.log(price / p0)
+        if action == 1:
+            delta = fix_c * (price / acted - 1.0)
+            actual += delta
+            acted = price
+            excess = actual - reference
+        else:
+            delta = 0.0
+            excess = actual - fix_c * math.log(acted / p0)
+        rows.append({
+            "step": step,
+            "action": action,
+            "price": price,
+            "acted_price": float(acted),
+            "delta_actual": float(delta),
+            "actual_cumulative": float(actual),
+            "ln_reference": float(reference),
+            "excess": float(excess),
+        })
+    return rows
+
+
 def simulate_rebalancing_prices(
     p0: float,
     vol: float,
