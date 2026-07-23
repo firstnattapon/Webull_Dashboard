@@ -387,3 +387,66 @@ def test_benchmark_rejects_unbounded_work():
             "bypass:3", 10.0, 100.0, 1000.0, 50.0, 100.0,
             iterations=100_001,
         )
+
+
+# ---- gated_rebalancing_cashflow_from_prices (gated_theoretical_v2) ----------
+def test_gated_cashflow_matches_gated_demo_csv_goldens():
+    from manual_tools import gated_rebalancing_cashflow_from_prices
+
+    prices = [96.81133514, 89.17306809, 91.27812248]
+    rows = gated_rebalancing_cashflow_from_prices(
+        prices, 1500.0, 100.0, [1, 1, 0])
+    # รอบ 2 act: ΔA เทียบราคา act ก่อนหน้า
+    assert rows[2]["delta_actual"] == pytest.approx(-118.3477179, abs=1e-4)
+    assert rows[2]["actual_cumulative"] == pytest.approx(-166.1776908, abs=1e-4)
+    assert rows[2]["excess"] == pytest.approx(5.708988114, abs=1e-4)
+    # รอบ 3 pass: A ค้าง, P_acted แช่แข็ง, smooth E ค้าง
+    assert rows[3]["delta_actual"] == 0.0
+    assert rows[3]["actual_cumulative"] == pytest.approx(-166.1776908, abs=1e-4)
+    assert rows[3]["acted_price"] == pytest.approx(89.17306809)
+    assert rows[3]["excess"] == pytest.approx(5.708988114, abs=1e-4)
+
+
+def test_gated_cashflow_react_after_freeze_one_big_step():
+    from manual_tools import gated_rebalancing_cashflow_from_prices
+
+    # แช่ที่ 89.17306809 ช่วง pass แล้ว act ที่ 110.7252073 -> ΔA ก้อนเดียว 362.53
+    prices = [96.81133514, 89.17306809, 91.27812248, 93.96129271, 110.7252073]
+    rows = gated_rebalancing_cashflow_from_prices(
+        prices, 1500.0, 100.0, [1, 1, 0, 0, 1])
+    assert rows[5]["delta_actual"] == pytest.approx(362.533325, abs=1e-4)
+    assert rows[5]["actual_cumulative"] == pytest.approx(196.3556342, abs=1e-4)
+    assert rows[5]["excess"] == pytest.approx(43.53362969, abs=1e-4)
+
+
+def test_gated_cashflow_excess_monotone_nonnegative():
+    from manual_tools import gated_rebalancing_cashflow_from_prices
+
+    prices = simulate_rebalancing_prices(100.0, 0.05, 0.0, 50, 7)
+    actions = [int(x) for x in np.resize(decode_dna(
+        "26021034252903219354832053493"), 50)]
+    rows = gated_rebalancing_cashflow_from_prices(prices, 1500.0, 100.0, actions)
+    excesses = [r["excess"] for r in rows]
+    assert all(b >= a - 1e-9 for a, b in zip(excesses, excesses[1:]))
+    assert excesses[-1] >= 0.0
+
+
+def test_gated_cashflow_all_pass_equals_frozen_anchor():
+    from manual_tools import gated_rebalancing_cashflow_from_prices
+
+    rows = gated_rebalancing_cashflow_from_prices(
+        [120.0, 80.0], 1500.0, 100.0, [0, 0])
+    assert all(r["actual_cumulative"] == 0.0 for r in rows)
+    assert all(r["acted_price"] == 100.0 for r in rows)
+    assert all(r["excess"] == 0.0 for r in rows)          # smooth ค้างค่า anchor
+
+
+def test_gated_cashflow_validation_fail_closed():
+    from manual_tools import gated_rebalancing_cashflow_from_prices
+
+    with pytest.raises(ValueError):
+        gated_rebalancing_cashflow_from_prices([100.0], 1500.0, 100.0, [2])
+    with pytest.raises(ValueError):
+        gated_rebalancing_cashflow_from_prices([0.0], 1500.0, 100.0, [1])
+    with pytest.raises(ValueError):
+        gated_rebalancing_cashflow_from_prices([100.0], -1.0, 100.0, [1])
